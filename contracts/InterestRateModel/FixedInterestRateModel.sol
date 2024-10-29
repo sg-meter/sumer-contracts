@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import './InterestRateModel.sol';
 import '@openzeppelin/contracts/utils/math/SafeMath.sol';
@@ -12,11 +12,6 @@ contract FixedInterestRateModel is InterestRateModel {
   using SafeMath for uint256;
 
   /**
-   * @notice The approximate number of blocks per year that is assumed by the interest rate model
-   */
-  uint256 public immutable blocksPerYear;
-
-  /**
    * @notice The multiplier of utilization rate that gives the slope of the interest rate
    */
   uint256 public borrowRate;
@@ -26,8 +21,7 @@ contract FixedInterestRateModel is InterestRateModel {
    */
   uint256 public supplyRate;
 
-  constructor(uint256 blocksPerYearOnChain, uint256 initBorrowRate, uint256 initSupplyRate) {
-    blocksPerYear = blocksPerYearOnChain;
+  constructor(uint256 initBorrowRate, uint256 initSupplyRate) {
     borrowRate = initBorrowRate;
     supplyRate = initSupplyRate;
   }
@@ -51,7 +45,7 @@ contract FixedInterestRateModel is InterestRateModel {
     cash;
     borrows;
     reserves;
-    return borrowRate / blocksPerYear;
+    return borrowRate / secondsPerYear;
   }
 
   /**
@@ -72,6 +66,6 @@ contract FixedInterestRateModel is InterestRateModel {
     borrows;
     reserves;
     reserveFactorMantissa;
-    return supplyRate/ blocksPerYear;
+    return supplyRate / secondsPerYear;
   }
 }

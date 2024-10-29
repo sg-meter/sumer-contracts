@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 interface IGovernorBravo {
   struct Receipt {
@@ -20,15 +20,12 @@ interface IGovernorBravo {
     bool executed;
   }
 
-  function getActions(uint256 proposalId)
+  function getActions(
+    uint256 proposalId
+  )
     external
     view
-    returns (
-      address[] memory targets,
-      uint256[] memory values,
-      string[] memory signatures,
-      bytes[] memory calldatas
-    );
+    returns (address[] memory targets, uint256[] memory values, string[] memory signatures, bytes[] memory calldatas);
 
   function proposals(uint256 proposalId) external view returns (Proposal memory);
 

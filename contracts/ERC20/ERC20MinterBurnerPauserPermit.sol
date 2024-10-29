@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '@openzeppelin/contracts/token/ERC20/extensions/draft-IERC20Permit.sol';
 import '@openzeppelin/contracts/utils/cryptography/EIP712.sol';

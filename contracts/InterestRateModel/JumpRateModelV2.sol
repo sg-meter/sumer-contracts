@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '@openzeppelin/contracts/utils/math/SafeMath.sol';
 import './InterestRateModel.sol';
@@ -13,31 +13,26 @@ contract JumpRateModelV2 is InterestRateModel {
   using SafeMath for uint256;
 
   event NewInterestParams(
-    uint256 baseRatePerBlock,
-    uint256 multiplierPerBlock,
-    uint256 jumpMultiplierPerBlock,
+    uint256 baseRatePerSecond,
+    uint256 multiplierPerSecond,
+    uint256 jumpMultiplierPerSecond,
     uint256 kink
   );
 
   /**
-   * @notice The approximate number of blocks per year that is assumed by the interest rate model
-   */
-  uint256 public immutable blocksPerYear;
-
-  /**
    * @notice The multiplier of utilization rate that gives the slope of the interest rate
    */
-  uint256 public multiplierPerBlock;
+  uint256 public multiplierPerSecond;
 
   /**
    * @notice The base interest rate which is the y-intercept when utilization rate is 0
    */
-  uint256 public baseRatePerBlock;
+  uint256 public baseRatePerSecond;
 
   /**
-   * @notice The multiplierPerBlock after hitting a specified utilization point
+   * @notice The multiplierPerSecond after hitting a specified utilization point
    */
-  uint256 public jumpMultiplierPerBlock;
+  uint256 public jumpMultiplierPerSecond;
 
   /**
    * @notice The utilization point at which the jump multiplier is applied
@@ -48,31 +43,18 @@ contract JumpRateModelV2 is InterestRateModel {
    * @notice Construct an interest rate model
    * @param baseRatePerYear The approximate target base APR, as a mantissa (scaled by 1e18)
    * @param multiplierPerYear The rate of increase in interest rate wrt utilization (scaled by 1e18)
-   * @param jumpMultiplierPerYear The multiplierPerBlock after hitting a specified utilization point
+   * @param jumpMultiplierPerYear The multiplierPerSecond after hitting a specified utilization point
    * @param kink_ The utilization point at which the jump multiplier is applied
    */
-  constructor(
-    uint256 blocksPerYearOnChain,
-    uint256 baseRatePerYear,
-    uint256 multiplierPerYear,
-    uint256 jumpMultiplierPerYear,
-    uint256 kink_
-  ) {
-    blocksPerYear = blocksPerYearOnChain;
-    _updateJumpRateModelInternal(
-      blocksPerYearOnChain,
-      baseRatePerYear,
-      multiplierPerYear,
-      jumpMultiplierPerYear,
-      kink_
-    );
+  constructor(uint256 baseRatePerYear, uint256 multiplierPerYear, uint256 jumpMultiplierPerYear, uint256 kink_) {
+    _updateJumpRateModelInternal(baseRatePerYear, multiplierPerYear, jumpMultiplierPerYear, kink_);
   }
 
   /**
    * @notice Update the parameters of the interest rate model (only callable by owner, i.e. Timelock)
    * @param baseRatePerYear The approximate target base APR, as a mantissa (scaled by 1e18)
    * @param multiplierPerYear The rate of increase in interest rate wrt utilization (scaled by 1e18)
-   * @param jumpMultiplierPerYear The multiplierPerBlock after hitting a specified utilization point
+   * @param jumpMultiplierPerYear The multiplierPerSecond after hitting a specified utilization point
    * @param kink_ The utilization point at which the jump multiplier is applied
    */
   function updateJumpRateModel(
@@ -81,7 +63,7 @@ contract JumpRateModelV2 is InterestRateModel {
     uint256 jumpMultiplierPerYear,
     uint256 kink_
   ) external virtual onlyOwner {
-    _updateJumpRateModelInternal(blocksPerYear, baseRatePerYear, multiplierPerYear, jumpMultiplierPerYear, kink_);
+    _updateJumpRateModelInternal(baseRatePerYear, multiplierPerYear, jumpMultiplierPerYear, kink_);
   }
 
   /**
@@ -114,11 +96,11 @@ contract JumpRateModelV2 is InterestRateModel {
     uint256 util = utilizationRate(cash, borrows, reserves);
 
     if (util <= kink) {
-      return util.mul(multiplierPerBlock).div(1e18).add(baseRatePerBlock);
+      return util.mul(multiplierPerSecond).div(1e18).add(baseRatePerSecond);
     } else {
-      uint256 normalRate = kink.mul(multiplierPerBlock).div(1e18).add(baseRatePerBlock);
+      uint256 normalRate = kink.mul(multiplierPerSecond).div(1e18).add(baseRatePerSecond);
       uint256 excessUtil = util.sub(kink);
-      return excessUtil.mul(jumpMultiplierPerBlock).div(1e18).add(normalRate);
+      return excessUtil.mul(jumpMultiplierPerSecond).div(1e18).add(normalRate);
     }
   }
 
@@ -146,22 +128,21 @@ contract JumpRateModelV2 is InterestRateModel {
    * @notice Internal function to update the parameters of the interest rate model
    * @param baseRatePerYear The approximate target base APR, as a mantissa (scaled by 1e18)
    * @param multiplierPerYear The rate of increase in interest rate wrt utilization (scaled by 1e18)
-   * @param jumpMultiplierPerYear The multiplierPerBlock after hitting a specified utilization point
+   * @param jumpMultiplierPerYear The multiplierPerSecond after hitting a specified utilization point
    * @param kink_ The utilization point at which the jump multiplier is applied
    */
   function _updateJumpRateModelInternal(
-    uint256 blocksPerYearOnChain,
     uint256 baseRatePerYear,
     uint256 multiplierPerYear,
     uint256 jumpMultiplierPerYear,
     uint256 kink_
   ) internal {
-    baseRatePerBlock = baseRatePerYear.div(blocksPerYearOnChain);
-    multiplierPerBlock = multiplierPerYear.div(blocksPerYearOnChain);
-    jumpMultiplierPerBlock = jumpMultiplierPerYear.div(blocksPerYearOnChain);
+    baseRatePerSecond = baseRatePerYear.mul(1e18).div(secondsPerYear).div(1e18);
+    multiplierPerSecond = multiplierPerYear.mul(1e18).div(secondsPerYear).div(1e18);
+    jumpMultiplierPerSecond = jumpMultiplierPerYear.mul(1e18).div(secondsPerYear).div(1e18);
     kink = kink_;
 
-    emit NewInterestParams(baseRatePerBlock, multiplierPerBlock, jumpMultiplierPerBlock, kink);
+    emit NewInterestParams(baseRatePerSecond, multiplierPerSecond, jumpMultiplierPerSecond, kink);
   }
 
   /**

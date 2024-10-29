@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import './CToken.sol';
 import '../Interfaces/ICErc20.sol';
@@ -34,25 +34,12 @@ contract CEther is CToken, Initializable {
     string memory name_,
     string memory symbol_,
     uint8 decimals_,
-    address payable admin_,
-    uint256 discountRateMantissa_,
-    uint256 reserveFactorMantissa_
+    address payable admin_
   ) public initializer {
-    super.initialize(
-      comptroller_,
-      interestRateModel_,
-      initialExchangeRateMantissa_,
-      name_,
-      symbol_,
-      decimals_,
-      true,
-      admin_,
-      discountRateMantissa_,
-      reserveFactorMantissa_
-    );
-
-    isCEther = true;
+    super.init(comptroller_, interestRateModel_, initialExchangeRateMantissa_, name_, symbol_, decimals_, admin_);
   }
+
+  function initializeVersion2() public virtual reinitializer(2) {}
 
   function _syncUnderlyingBalance() external override onlyAdmin {
     underlyingBalance = address(this).balance;
@@ -187,10 +174,11 @@ contract CEther is CToken, Initializable {
 
   function transferToTimelock(bool isBorrow, address to, uint256 underlyAmount) internal virtual override {
     address timelock = IComptroller(comptroller).timelock();
+    (bool success, ) = timelock.call(abi.encodeWithSignature('consumeValue(uint256)', underlyAmount));
 
-    if (ITimelock(timelock).consumeValuePreview(underlyAmount, address(this))) {
+    if (success) {
       // if leaky bucket covers underlyAmount, release immediately
-      ITimelock(timelock).consumeValue(underlyAmount);
+      // ITimelock(timelock).consumeValue(underlyAmount);
       doTransferOut(payable(to), underlyAmount);
     } else {
       doTransferOut(payable(timelock), underlyAmount);
@@ -221,5 +209,12 @@ contract CEther is CToken, Initializable {
     fullMessage[i + 4] = bytes1(uint8(41));
 
     require(errCode == uint256(0), string(fullMessage));
+  }
+
+  function isCToken() public pure override returns (bool) {
+    return true;
+  }
+  function isCEther() external pure override returns (bool) {
+    return true;
   }
 }

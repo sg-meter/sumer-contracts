@@ -1,5 +1,71 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
+
+enum Version {
+  V0,
+  V1,
+  V2, // packed asset group
+  V3, // added interMintRate into asset group
+  V4 // use interMintSwitch instead of interMintRate
+}
+
+struct GroupVar {
+  uint8 groupId;
+  uint256 cDepositVal;
+  uint256 cBorrowVal;
+  uint256 suDepositVal;
+  uint256 suBorrowVal;
+  uint256 intraCRate;
+  uint256 intraMintRate;
+  uint256 intraSuRate;
+  uint256 interCRate;
+  uint256 interSuRate;
+}
+
+/// @notice AssetGroup, contains information of groupName and rateMantissas
+struct AssetGroupDeprecated {
+  uint8 groupId;
+  string groupName;
+  uint256 intraCRateMantissa;
+  uint256 intraMintRateMantissa;
+  uint256 intraSuRateMantissa;
+  uint256 interCRateMantissa;
+  uint256 interSuRateMantissa;
+  bool exist;
+}
+
+/// @notice NewAssetGroup, contains information of groupName and rateMantissas
+struct CompactAssetGroup {
+  uint8 groupId;
+  uint16 intraCRatePercent;
+  uint16 intraMintRatePercent;
+  uint16 intraSuRatePercent;
+  uint16 interCRatePercent;
+  uint16 interSuRatePercent;
+}
+
+struct GlobalConfig {
+  uint16 closeFactorPercent; // percent decimals(4)
+  uint32 minCloseValue; // usd value decimals(0)
+  uint32 minSuBorrowValue; // usd value decimals(0)
+  uint32 minWaitBeforeLiquidatable; // seconds decimals(0)
+  uint8 largestGroupId;
+}
+
+struct MarketConfig {
+  bool mintPaused;
+  bool borrowPaused;
+  bool transferPaused;
+  bool seizePaused;
+  uint120 borrowCap; //
+  uint120 supplyCap;
+}
+
+struct LiquidationIncentive {
+  uint16 heteroPercent;
+  uint16 homoPercent;
+  uint16 sutokenPercent;
+}
 
 interface IComptroller {
   /*** Assets You Are In ***/
@@ -13,16 +79,12 @@ interface IComptroller {
 
   function redemptionManager() external view returns (address);
 
-  function enterMarkets(address[] calldata cTokens) external returns (uint256[] memory);
+  function enterMarkets(address[] calldata cTokens) external;
 
-  function exitMarket(address cToken) external returns (uint256);
-
-  function closeFactorMantissa() external view returns (uint256);
-
-  function getAccountLiquidity(address) external view returns (uint256, uint256, uint256);
+  function exitMarket(address cToken) external;
 
   // function getAssetsIn(address) external view returns (ICToken[] memory);
-  function claimComp(address) external;
+  function claimSumer(address) external;
 
   function compAccrued(address) external view returns (uint256);
 
@@ -36,19 +98,19 @@ interface IComptroller {
   function mintAllowed(address cToken, address minter, uint256 mintAmount) external;
 
   function redeemAllowed(address cToken, address redeemer, uint256 redeemTokens) external;
-  // function redeemVerify(address cToken, address redeemer, uint256 redeemAmount, uint256 redeemTokens) external;
+  function redeemVerify(address cToken, address redeemer, uint256 redeemAmount, uint256 redeemTokens) external;
 
   function borrowAllowed(address cToken, address borrower, uint256 borrowAmount) external;
   function borrowVerify(address borrower, uint borrowAmount) external;
 
   function repayBorrowAllowed(address cToken, address payer, address borrower, uint256 repayAmount) external;
-  // function repayBorrowVerify(
-  //   address cToken,
-  //   address payer,
-  //   address borrower,
-  //   uint repayAmount,
-  //   uint borrowerIndex
-  // ) external;
+  function repayBorrowVerify(
+    address cToken,
+    address payer,
+    address borrower,
+    uint actualRepayAmount,
+    uint borrowIndex
+  ) external;
 
   function seizeAllowed(
     address cTokenCollateral,
@@ -69,18 +131,16 @@ interface IComptroller {
 
   /*** Liquidity/Liquidation Calculations ***/
 
-  function liquidationIncentiveMantissa() external view returns (uint256, uint256, uint256);
+  function liquidationIncentive() external view returns (LiquidationIncentive memory);
 
   function isListed(address asset) external view returns (bool);
-
-  function marketGroupId(address asset) external view returns (uint8);
 
   function getHypotheticalAccountLiquidity(
     address account,
     address cTokenModify,
     uint256 redeemTokens,
     uint256 borrowAmount
-  ) external view returns (uint256, uint256, uint256);
+  ) external view returns (uint256, uint256);
 
   // function _getMarketBorrowCap(address cToken) external view returns (uint256);
 
@@ -98,31 +158,9 @@ interface IComptroller {
 
   event RemoveAssetGroup(uint8 indexed groupId, uint8 equalAssetsGroupNum);
 
-  /// @notice AssetGroup, contains information of groupName and rateMantissas
-  struct AssetGroup {
-    uint8 groupId;
-    string groupName;
-    uint256 intraCRateMantissa;
-    uint256 intraMintRateMantissa;
-    uint256 intraSuRateMantissa;
-    uint256 interCRateMantissa;
-    uint256 interSuRateMantissa;
-    bool exist;
-  }
+  function assetGroup(uint8 groupId) external view returns (CompactAssetGroup memory);
 
-  function getAssetGroupNum() external view returns (uint8);
-
-  function getAssetGroup(uint8 groupId) external view returns (AssetGroup memory);
-
-  function getAllAssetGroup() external view returns (AssetGroup[] memory);
-
-  function assetGroupIdToIndex(uint8) external view returns (uint8);
-
-  function borrowGuardianPaused(address cToken) external view returns (bool);
-
-  function getCompAddress() external view returns (address);
-
-  function borrowCaps(address cToken) external view returns (uint256);
+  function marketConfig(address cToken) external view returns (MarketConfig memory);
 
   function liquidateBorrowAllowed(
     address cTokenBorrowed,
@@ -131,14 +169,16 @@ interface IComptroller {
     address borrower,
     uint256 repayAmount
   ) external view;
-  // function liquidateBorrowVerify(
-  //   address cTokenBorrowed,
-  //   address cTokenCollateral,
-  //   address liquidator,
-  //   address borrower,
-  //   uint repayAmount,
-  //   uint seizeTokens
-  // ) external;
+  function liquidateBorrowVerify(
+    address cTokenBorrowed,
+    address cTokenCollateral,
+    address liquidator,
+    address borrower,
+    uint repayAmount,
+    uint seizeTokens
+  ) external;
 
-  function getCollateralRate(address collateralToken, address liabilityToken) external view returns (uint256);
+  function globalConfig() external view returns (GlobalConfig memory);
+
+  function interMintAllowed() external view returns (bool);
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 interface ITimelock {
   /** @notice Event emitted when a new time-lock agreement is created
@@ -75,6 +75,6 @@ interface ITimelock {
     address beneficiary
   ) external returns (uint256);
 
-  function consumeValuePreview(uint256 underlyAmount, address cToken) external view returns (bool);
+  // function consumeValuePreview(uint256 underlyAmount, address cToken) external view returns (bool);
   function consumeValue(uint256 underlyAmount) external;
 }

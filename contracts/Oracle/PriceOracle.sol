@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 abstract contract PriceOracle {
   /// @notice Indicator that this is a PriceOracle contract (for inspection)
@@ -12,4 +12,16 @@ abstract contract PriceOracle {
    *  Zero means the price is unavailable.
    */
   function getUnderlyingPrice(address cToken) external view virtual returns (uint256);
+
+  function getPrice(address asset) external view virtual returns (uint256);
+}
+
+abstract contract PriceAdapter {
+  address underlyingToken;
+  address correlatedToken;
+
+  /**
+   * @notice returns underlying tokens for 1 correlatedToken
+   */
+  function exchangeRate() external view virtual returns (uint256);
 }

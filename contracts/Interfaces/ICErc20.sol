@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+import './IEIP20NonStandard.sol';
+
+pragma solidity ^0.8.19;
 
 interface ICErc20 {
   /*** User Interface ***/
@@ -16,13 +18,9 @@ interface ICErc20 {
 
   function repayBorrowBehalf(address borrower, uint256 repayAmount) external returns (uint256);
 
-  function liquidateBorrow(
-    address borrower,
-    uint256 repayAmount,
-    address cTokenCollateral
-  ) external returns (uint256);
+  function liquidateBorrow(address borrower, uint256 repayAmount, address cTokenCollateral) external returns (uint256);
 
-  function sweepToken(address token) external;
+  function sweepToken(IEIP20NonStandard token) external;
 
   /*** Admin Functions ***/
 

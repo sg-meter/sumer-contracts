@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '../Interfaces/ICTokenExternal.sol';
 import '../Interfaces/IPriceOracle.sol';
@@ -7,10 +7,10 @@ import '../Interfaces/IGovernorAlpha.sol';
 import '../Interfaces/IComptroller.sol';
 import '../Interfaces/IGovernorBravo.sol';
 import '../Exponential/ExponentialNoErrorNew.sol';
-import './ComptrollerStorage.sol';
 import '../SumerErrors.sol';
 
 contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
+  uint256 public constant percentScale = 1e14;
   struct CTokenMetadata {
     address cToken;
     uint256 exchangeRateCurrent;
@@ -38,6 +38,7 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
     uint256 mintRate;
     uint256 interRate;
     uint256 discountRate;
+    bool interMintAllowed;
   }
 
   struct GroupInfo {
@@ -62,19 +63,18 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
 
     // get group info
     (bool isListed, uint8 assetGroupId, ) = comptroller.markets(address(cToken));
-    IComptroller.AssetGroup memory group = comptroller.getAssetGroup(assetGroupId);
+    CompactAssetGroup memory group = comptroller.assetGroup(assetGroupId);
     GroupInfo memory gi;
     if (cToken.isCToken()) {
-      gi.intraRate = group.intraCRateMantissa;
-      gi.interRate = group.interCRateMantissa;
-      gi.mintRate = group.intraMintRateMantissa;
+      gi.intraRate = uint256(group.intraCRatePercent) * percentScale;
+      gi.interRate = uint256(group.interCRatePercent) * percentScale;
+      gi.mintRate = uint256(group.intraMintRatePercent) * percentScale;
     } else {
-      gi.intraRate = group.intraSuRateMantissa;
-      gi.interRate = group.interSuRateMantissa;
-      gi.mintRate = group.intraSuRateMantissa;
+      gi.intraRate = uint256(group.intraSuRatePercent) * percentScale;
+      gi.interRate = uint256(group.interSuRatePercent) * percentScale;
+      gi.mintRate = uint256(group.intraSuRatePercent) * percentScale;
     }
-    (uint256 heteroIncentiveMantissa, uint256 homoIncentiveMantissa, uint256 sutokenIncentiveMantissa) = comptroller
-      .liquidationIncentiveMantissa();
+    LiquidationIncentive memory liquidationIncentive = comptroller.liquidationIncentive();
     return
       CTokenMetadata({
         cToken: address(cToken),
@@ -92,16 +92,17 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
         underlyingDecimals: underlyingDecimals,
         isCToken: cToken.isCToken(),
         isCEther: cToken.isCEther(),
-        borrowCap: comptroller.borrowCaps(address(cToken)),
-        depositCap: ComptrollerStorage(address(comptroller)).maxSupply(address(cToken)),
-        heteroLiquidationIncentive: heteroIncentiveMantissa,
-        homoLiquidationIncentive: homoIncentiveMantissa,
-        sutokenLiquidationIncentive: sutokenIncentiveMantissa,
+        borrowCap: comptroller.marketConfig(address(cToken)).borrowCap,
+        depositCap: comptroller.marketConfig(address(cToken)).supplyCap,
+        heteroLiquidationIncentive: uint256(liquidationIncentive.heteroPercent) * percentScale,
+        homoLiquidationIncentive: uint256(liquidationIncentive.homoPercent) * percentScale,
+        sutokenLiquidationIncentive: uint256(liquidationIncentive.sutokenPercent) * percentScale,
         groupId: assetGroupId,
         intraRate: gi.intraRate,
         interRate: gi.interRate,
         mintRate: gi.mintRate,
-        discountRate: cToken.discountRateMantissa()
+        discountRate: cToken.discountRateMantissa(),
+        interMintAllowed: comptroller.interMintAllowed()
       });
   }
 
@@ -198,8 +199,7 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
   }
 
   function getAccountLimits(IComptroller comptroller, address account) external view returns (AccountLimits memory) {
-    (uint256 errorCode, uint256 liquidity, uint256 shortfall) = comptroller.getAccountLiquidity(account);
-    require(errorCode == 0);
+    (uint256 liquidity, uint256 shortfall) = comptroller.getHypotheticalAccountLiquidity(account, address(0), 0, 0);
 
     return AccountLimits({markets: comptroller.getAssetsIn(account), liquidity: liquidity, shortfall: shortfall});
   }
@@ -422,7 +422,7 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
     address account
   ) external returns (CompBalanceMetadataExt memory) {
     uint256 balance = comp.balanceOf(account);
-    comptroller.claimComp(account);
+    comptroller.claimSumer(account);
     uint256 newBalance = comp.balanceOf(account);
     uint256 accrued = comptroller.compAccrued(account);
     uint256 total = add(accrued, newBalance, 'sum comp total');
@@ -473,54 +473,82 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
     return c;
   }
 
+  function getCollateralRate(
+    IComptroller comptroller,
+    address collateralToken,
+    address liabilityToken
+  ) public view returns (uint256) {
+    (bool isListedCollateral, uint8 collateralGroupId, ) = comptroller.markets(collateralToken);
+    if (!isListedCollateral) {
+      revert MarketNotListed();
+    }
+    (bool isListedLiability, uint8 liabilityGroupId, ) = comptroller.markets(liabilityToken);
+    if (!isListedLiability) {
+      revert MarketNotListed();
+    }
+
+    bool collateralIsCToken = ICToken(collateralToken).isCToken();
+    bool liabilityIsCToken = ICToken(liabilityToken).isCToken();
+
+    if (collateralIsCToken) {
+      // collateral is cToken
+      if (collateralGroupId == liabilityGroupId) {
+        // collaterl/liability is in the same group
+        if (liabilityIsCToken) {
+          return uint256(comptroller.assetGroup(collateralGroupId).intraCRatePercent) * percentScale;
+        } else {
+          return uint256(comptroller.assetGroup(collateralGroupId).intraMintRatePercent) * percentScale;
+        }
+      } else {
+        // collateral/liability is not in the same group
+        return uint256(comptroller.assetGroup(collateralGroupId).interCRatePercent) * percentScale;
+      }
+    } else {
+      // collateral is suToken
+      if (collateralGroupId == liabilityGroupId) {
+        // collaterl/liability is in the same group
+        return uint256(comptroller.assetGroup(collateralGroupId).intraSuRatePercent) * percentScale;
+      } else {
+        // collateral/liability is not in the same group
+        return uint256(comptroller.assetGroup(collateralGroupId).interSuRatePercent) * percentScale;
+      }
+    }
+  }
+
   function calcBorrowAmountForProtectedMint(
     address account,
     address cTokenCollateral,
     address suToken,
     uint256 suBorrowAmount
   ) public view returns (uint256, uint256) {
-    address comptroller = ICToken(cTokenCollateral).comptroller();
-    require(comptroller == ICToken(suToken).comptroller(), 'not the same comptroller');
+    IComptroller comptroller = IComptroller(ICToken(cTokenCollateral).comptroller());
+    require(address(comptroller) == ICToken(suToken).comptroller(), 'not the same comptroller');
 
-    uint256 collateralRateMantissa = IComptroller(comptroller).getCollateralRate(cTokenCollateral, suToken);
-    address oracle = IComptroller(comptroller).oracle();
+    (uint256 liquidity, ) = comptroller.getHypotheticalAccountLiquidity(account, cTokenCollateral, 0, 0);
+    uint256 maxCBorrowAmount = (liquidity * expScale) / comptroller.getUnderlyingPriceNormalized(cTokenCollateral);
 
-    // get suToken price
-    uint256 suPriceMantissa = IComptroller(comptroller).getUnderlyingPriceNormalized(suToken);
+    address[] memory assets = comptroller.getAssetsIn(account);
+    (, uint8 suGroupId, ) = comptroller.markets(suToken);
 
-    // get cToken price
-    uint256 cPriceMantissa = IComptroller(comptroller).getUnderlyingPriceNormalized(cTokenCollateral);
-
-    (, uint256 liquidity, ) = IComptroller(comptroller).getHypotheticalAccountLiquidity(
-      account,
-      cTokenCollateral,
-      0,
-      0
-    );
-    uint256 maxCBorrowAmount = (liquidity * expScale) / cPriceMantissa;
-
-    address[] memory assets = IComptroller(comptroller).getAssetsIn(account);
-    (, uint8 suGroupId, ) = IComptroller(comptroller).markets(suToken);
-
-    uint256 shortfallMantissa = suPriceMantissa * suBorrowAmount;
+    uint256 shortfallMantissa = comptroller.getUnderlyingPriceNormalized(suToken) * suBorrowAmount;
     uint256 liquidityMantissa = 0;
 
     for (uint256 i = 0; i < assets.length; ++i) {
       address asset = assets[i];
-      (, uint8 assetGroupId, ) = IComptroller(comptroller).markets(asset);
+      (, uint8 assetGroupId, ) = comptroller.markets(asset);
 
       // only consider asset in the same group
       if (assetGroupId != suGroupId) {
         continue;
       }
 
-      (uint256 oErr, uint256 depositBalance, uint256 borrowBalance, uint256 exchangeRateMantissa) = ICToken(asset)
+      (uint256 depositBalance, uint256 borrowBalance, uint256 exchangeRateMantissa, ) = ICToken(asset)
         .getAccountSnapshot(account);
 
       // get token price
-      uint256 tokenPriceMantissa = IComptroller(comptroller).getUnderlyingPriceNormalized(asset);
+      uint256 tokenPriceMantissa = comptroller.getUnderlyingPriceNormalized(asset);
 
-      uint256 tokenCollateralRateMantissa = IComptroller(comptroller).getCollateralRate(asset, suToken);
+      uint256 tokenCollateralRateMantissa = getCollateralRate(comptroller, asset, suToken);
 
       if (asset == suToken) {
         shortfallMantissa = shortfallMantissa + tokenPriceMantissa * borrowBalance;
@@ -537,8 +565,15 @@ contract CompoundLens is ExponentialNoErrorNew, SumerErrors {
     }
 
     return (
-      ((shortfallMantissa - liquidityMantissa) * expScale) / cPriceMantissa / collateralRateMantissa,
+      ((shortfallMantissa - liquidityMantissa) * expScale) /
+        comptroller.getUnderlyingPriceNormalized(cTokenCollateral) /
+        getCollateralRate(IComptroller(comptroller), cTokenCollateral, suToken),
       maxCBorrowAmount
     );
+  }
+
+  // version is enabled after V3
+  function version() external pure returns (Version) {
+    return Version.V4;
   }
 }

@@ -1,30 +1,29 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '../Interfaces/IComptroller.sol';
+import '../Interfaces/ICompLogic.sol';
+import '../Interfaces/IPriceOracle.sol';
+import '../Interfaces/IRedemptionManager.sol';
 
 contract ComptrollerStorage {
   /// @notice Indicator that this is a Comptroller contract (for inspection)
   bool public constant isComptroller = true;
+  uint256 internal constant percentScale = 1e14;
+  bytes32 public constant PAUSER_ROLE = keccak256('PAUSER_ROLE');
+  uint256 internal constant expScale = 1e18;
 
-  /**
-   * @notice Multiplier used to calculate the maximum repayAmount when liquidating a borrow
-   */
-  uint256 public closeFactorMantissa;
+  // from AccessControlEnumerableUpgradeable
+  uint256[50] private __gap;
 
-  /**
-   * @notice Multiplier representing the discount on collateral that a liquidator receives
-   */
-  uint256 public heteroLiquidationIncentiveMantissa;
+  // uint256 closeFactorMantissa; // 201
+  // uint256 heteroLiquidationIncentiveMantissa; // 202
+  uint256[2] private gap0; // 201-202
 
-  string internal constant INSUFFICIENT_LIQUIDITY = 'insufficient liquidity'; // deprecated
-  string internal constant MARKET_NOT_LISTED = 'market not listed';
-  string internal constant UNAUTHORIZED = 'unauthorized';
-  string internal constant SNAPSHOT_ERROR = 'snapshot error';
   /**
    * @notice Per-account mapping of "assets you are in", capped by maxAssets
    */
-  mapping(address => address[]) public accountAssets;
+  mapping(address => address[]) public accountAssets; // 203
   /// @notice Whether or not this market is listed
   /// @notice Per-market mapping of "accounts in this asset"
   /// @notice Whether or not this market receives COMP
@@ -39,84 +38,60 @@ contract ComptrollerStorage {
    * @notice Official mapping of cTokens -> Market metadata
    * @dev Used e.g. to determine if a market is supported
    */
-  mapping(address => Market) public markets;
+  mapping(address => Market) public markets; // 204
 
   /// @notice A list of all markets
-  address[] public allMarkets;
+  address[] public allMarkets; // 205
 
-  mapping(address => uint256) public maxSupply;
+  // mapping(address => uint256) public maxSupply; // 206
+  // uint256 internal homoLiquidationIncentiveMantissa; // 207
+  // uint256 internal sutokenLiquidationIncentiveMantissa; // 208
+  uint256[3] private gap1;
 
-  /// @notice Emitted when an admin supports a market
-  event MarketListed(address cToken);
+  address public governanceToken; // 209
 
-  /// @notice Emitted when an account enters a market
-  event MarketEntered(address cToken, address account);
+  // uint256 public suTokenRateMantissa; // 210
+  // AssetGroupDeprecated[] public _eqAssetGroupsDeprecated; // 211
+  // mapping(uint8 => uint8) public assetGroupIdToIndex; // 212
+  uint256[3] private gap22;
 
-  /// @notice Emitted when an account exits a market
-  event MarketExited(address cToken, address account);
+  address public pauseGuardian; // 213
+  // bool private _mintGuardianPaused;
+  // bool private _borrowGuardianPaused;
+  // bool private transferGuardianPaused;
+  // bool private seizeGuardianPaused;
+  // mapping(address => bool) private mintGuardianPaused; // 214
+  // mapping(address => bool) private borrowGuardianPaused; // 215
+  // address public borrowCapGuardian; // 216
+  // mapping(address => uint256) public borrowCaps; // 217
+  uint256[4] private gap3;
 
-  /// @notice Emitted when close factor is changed by admin
-  event NewCloseFactor(uint256 oldCloseFactorMantissa, uint256 newCloseFactorMantissa);
+  // additional variables
+  ICompLogic public compLogic; // 218
+  IPriceOracle public oracle; // 219
 
-  /// @notice Emitted when liquidation incentive is changed by admin
-  event NewLiquidationIncentive(
-    uint256 oldHeteroIncentive,
-    uint256 newHeteroIncentive,
-    uint256 oldHomoIncentive,
-    uint256 newHomoIncentive,
-    uint256 oldSutokenIncentive,
-    uint256 newSutokenIncentive
-  );
+  // IAccountLiquidity public accountLiquidity; // 220
+  uint256 private gap4; // 220
 
-  /// @notice Emitted when price oracle is changed
-  event NewPriceOracle(address oldPriceOracle, address newPriceOracle);
+  address public timelock; // 221
+  IRedemptionManager public redemptionManager; // 222
 
-  event SetMaxSupply(address indexed cToken, uint256 amount);
+  // uint256 public minSuBorrowValue; // 223
+  // bool protocolPaused; // 224
+  // uint256 public minCloseValue; // 225
+  uint256[3] private gap5; // 223-225
 
-  /*
-    Liquidation Incentive for repaying homogeneous token
-  */
-  uint256 public homoLiquidationIncentiveMantissa;
+  // ctoken => last borrowed at timestamp
+  mapping(address => uint48) public lastBorrowedAt; // 226
 
-  /*
-    Liquidation Incentive for repaying sutoken
-  */
-  uint256 public sutokenLiquidationIncentiveMantissa;
+  // uint48 public minWaitBeforeLiquidatable; // 227
+  uint256 private gap6;
 
-  address public governanceToken;
+  mapping(uint8 => CompactAssetGroup) public assetGroup; // groupId => asset group 228
+  mapping(address => MarketConfig) public marketConfig; // ctoken => market configs & pause switches 229
 
-  uint256 public suTokenRateMantissa; // deprecated
+  GlobalConfig public globalConfig; // 230
+  LiquidationIncentive public liquidationIncentive; // 231
 
-  /**
-   * @notice eqAssetGroup, cToken -> equal assets info.
-   */
-
-  // uint8 public equalAssetsGroupNum;
-  /**
-   * @notice eqAssetGroup, groupId -> equal assets info.
-   */
-  // mapping(uint8 => IComptroller.AssetGroup) public eqAssetGroup;
-
-  IComptroller.AssetGroup[] internal _eqAssetGroups;
-
-  mapping(uint8 => uint8) public assetGroupIdToIndex;
-
-  /**
-   * @notice The Pause Guardian can pause certain actions as a safety mechanism.
-   *  Actions which allow users to remove their own assets cannot be paused.
-   *  Liquidation / seizing / transfer can only be paused globally, not by market.
-   */
-  address public pauseGuardian;
-  bool public _mintGuardianPaused; // deprecated
-  bool public _borrowGuardianPaused; // deprecated
-  bool public transferGuardianPaused;
-  bool public seizeGuardianPaused;
-  mapping(address => bool) public mintGuardianPaused;
-  mapping(address => bool) public borrowGuardianPaused;
-
-  // @notice The borrowCapGuardian can set borrowCaps to any number for any market. Lowering the borrow cap could disable borrowing on the given market.
-  address public borrowCapGuardian;
-
-  // @notice Borrow caps enforced by borrowAllowed for each cToken address. Defaults to zero which corresponds to unlimited borrowing.
-  mapping(address => uint256) public borrowCaps;
+  bool public interMintAllowed; //
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 import '@openzeppelin/contracts/access/Ownable2Step.sol';
 /**
  * @title Compound's InterestRateModel Interface
@@ -8,6 +8,11 @@ import '@openzeppelin/contracts/access/Ownable2Step.sol';
 abstract contract InterestRateModel is Ownable2Step {
   /// @notice Indicator that this is an InterestRateModel contract (for inspection)
   bool public constant isInterestRateModel = true;
+
+  /**
+   * @notice The seconds per year that is used by the interest rate model
+   */
+  uint public constant secondsPerYear = 60 * 60 * 24 * 365;
 
   /**
    * @notice Calculates the current borrow interest rate per block

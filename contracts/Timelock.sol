@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import '@openzeppelin/contracts-upgradeable/access/AccessControlEnumerableUpgradeable.sol';
@@ -38,7 +38,7 @@ contract Timelock is
   uint48 public maxDelay = 60 * 60 * 12; // default to 12 hours
   uint256 public threshold;
 
-  IComptroller comptroller;
+  IComptroller public comptroller;
   RateLimiter.TokenBucket rateLimiter;
   event NewThreshold(uint256 oldValue, uint256 newValue);
   event NewMinDelay(uint48 oldValue, uint48 newValue);
@@ -49,14 +49,7 @@ contract Timelock is
     _disableInitializers();
   }
 
-  function initialize(
-    address _admin,
-    IComptroller _comptroller,
-    uint256 rate,
-    uint256 capacity,
-    uint256 _threshold
-  ) external initializer {
-    comptroller = _comptroller;
+  function initialize(address _admin, uint256 rate, uint256 capacity, uint256 _threshold) external initializer {
     rateLimiter = RateLimiter.TokenBucket({
       rate: rate,
       capacity: capacity,
@@ -73,6 +66,10 @@ contract Timelock is
 
     _setupRole(DEFAULT_ADMIN_ROLE, _admin);
     _setupRole(EMERGENCY_ADMIN, _admin);
+  }
+
+  function setComptroller(address _comptroller) external onlyAdmin {
+    comptroller = IComptroller(_comptroller);
   }
 
   function setMinDelay(uint48 newMinDelayInSeconds) external onlyAdmin {
@@ -109,6 +106,10 @@ contract Timelock is
 
   /// @notice Consumes value from the rate limiter bucket based on the token value given.
   function consumeValue(uint256 underlyAmount) external onlyListedCToken(msg.sender) {
+    uint256 usdValue = getUSDValue(underlyAmount, msg.sender);
+    if (usdValue > threshold) {
+      revert OverThreshold();
+    }
     consumeValueInternal(underlyAmount, msg.sender);
   }
 

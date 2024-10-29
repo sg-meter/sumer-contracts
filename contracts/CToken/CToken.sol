@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '../Interfaces/IComptroller.sol';
 import '../Interfaces/IPriceOracle.sol';
@@ -15,6 +15,102 @@ import '../SumerErrors.sol';
  * @author Compound
  */
 abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
+  /*** Market Events ***/
+
+  /**
+   * @notice Event emitted when interest is accrued
+   */
+  event AccrueInterest(uint256 cashPrior, uint256 interestAccumulated, uint256 borrowIndex, uint256 totalBorrows);
+
+  /**
+   * @notice Event emitted when tokens are minted
+   */
+  event Mint(address minter, uint256 mintAmount, uint256 mintTokens);
+
+  /**
+   * @notice Event emitted when tokens are redeemed
+   */
+  event Redeem(address redeemer, uint256 redeemAmount, uint256 redeemTokens);
+
+  /**
+   * @notice Event emitted when underlying is borrowed
+   */
+  event Borrow(address borrower, uint256 borrowAmount, uint256 accountBorrows, uint256 totalBorrows);
+
+  /**
+   * @notice Event emitted when a borrow is repaid
+   */
+  event RepayBorrow(address payer, address borrower, uint256 repayAmount, uint256 accountBorrows, uint256 totalBorrows);
+
+  /**
+   * @notice Event emitted when a borrow is liquidated
+   */
+  event LiquidateBorrow(
+    address liquidator,
+    address borrower,
+    uint256 repayAmount,
+    address cTokenCollateral,
+    uint256 seizeTokens
+  );
+
+  /*** Admin Events ***/
+
+  /**
+   * @notice Event emitted when pendingAdmin is changed
+   */
+  event NewPendingAdmin(address oldPendingAdmin, address newPendingAdmin);
+
+  /**
+   * @notice Event emitted when pendingAdmin is accepted, which means admin is updated
+   */
+  event NewAdmin(address oldAdmin, address newAdmin);
+
+  /**
+   * @notice Event emitted when comptroller is changed
+   */
+  event NewComptroller(address oldComptroller, address newComptroller);
+
+  /**
+   * @notice Event emitted when interestRateModel is changed
+   */
+  event NewMarketInterestRateModel(address oldInterestRateModel, address newInterestRateModel);
+
+  /**
+   * @notice Event emitted when the reserve factor is changed
+   */
+  event NewReserveFactor(uint256 oldReserveFactorMantissa, uint256 newReserveFactorMantissa);
+
+  /**
+   * @notice Event emitted when the reserves are added
+   */
+  event ReservesAdded(address benefactor, uint256 addAmount, uint256 newTotalReserves);
+
+  /**
+   * @notice Event emitted when the reserves are reduced
+   */
+  event ReservesReduced(address admin, uint256 reduceAmount, uint256 newTotalReserves);
+
+  /**
+   * @notice EIP20 Transfer event
+   */
+  event Transfer(address indexed from, address indexed to, uint256 amount);
+
+  /**
+   * @notice EIP20 Approval event
+   */
+  event Approval(address indexed owner, address indexed spender, uint256 amount);
+
+  event NewDiscountRate(uint256 oldDiscountRateMantissa, uint256 newDiscountRateMantissa);
+
+  event RedeemFaceValue(
+    address indexed redeemer,
+    address indexed provider,
+    uint256 repayAmount,
+    address seizeToken,
+    uint256 seizeAmount, // user seize amount + protocol seize amount
+    uint256 redemptionRateMantissa
+  );
+
   modifier onlyAdmin() {
     // Check caller is admin
     if (msg.sender != admin) {
@@ -32,24 +128,19 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
    * @param symbol_ EIP-20 symbol of this token
    * @param decimals_ EIP-20 decimal precision of this token
    */
-  function initialize(
+  function init(
     address comptroller_,
     address interestRateModel_,
     uint256 initialExchangeRateMantissa_,
     string memory name_,
     string memory symbol_,
     uint8 decimals_,
-    bool isCToken_,
-    address payable _admin,
-    uint256 discountRateMantissa_,
-    uint256 reserveFactorMantissa_
+    address payable _admin
   ) internal {
     admin = _admin;
-    if (accrualBlockNumber != 0 || borrowIndex != 0) {
+    if (accrualBlockTimestamp != 0 || borrowIndex != 0) {
       revert MarketCanOnlyInitializeOnce(); // market may only be initialized once
     }
-
-    isCToken = isCToken_;
 
     // Set initial exchange rate
     initialExchangeRateMantissa = initialExchangeRateMantissa_;
@@ -57,12 +148,8 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
       revert InvalidExchangeRate();
     } // initial exchange rate must be greater than zero
 
-    discountRateMantissa = discountRateMantissa_;
-    if (discountRateMantissa <= 0 || discountRateMantissa > 1e18) {
-      revert InvalidDiscountRate();
-    } // rate must in [0,100]
-
-    reserveFactorMantissa = reserveFactorMantissa_;
+    discountRateMantissa = 1e18; // default to be 100%
+    reserveFactorMantissa = 1e17; // default to be 10%
     // Set the comptroller
     // Set market's comptroller to newComptroller
     comptroller = comptroller_;
@@ -71,7 +158,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     emit NewComptroller(address(0), comptroller_);
 
     // Initialize block number and borrow index (block number mocks depend on comptroller being set)
-    accrualBlockNumber = getBlockNumber();
+    accrualBlockTimestamp = getBlockTimestamp();
     borrowIndex = 1e18;
 
     // Set the interest rate model (depends on block number / borrow index)
@@ -211,15 +298,20 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
    * @return (possible error, token balance, borrow balance, exchange rate mantissa)
    */
   function getAccountSnapshot(address account) external view override returns (uint256, uint256, uint256, uint256) {
-    return (uint(0), accountTokens[account], borrowBalanceStoredInternal(account), exchangeRateStoredInternal());
+    return (
+      accountTokens[account],
+      borrowBalanceStoredInternal(account),
+      exchangeRateStoredInternal(),
+      discountRateMantissa
+    );
   }
 
   /**
    * @dev Function to simply retrieve block number
    *  This exists mainly for inheriting test contracts to stub this result.
    */
-  function getBlockNumber() internal view returns (uint256) {
-    return block.number;
+  function getBlockTimestamp() internal view returns (uint256) {
+    return block.timestamp;
   }
 
   /**
@@ -319,7 +411,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
    * @return (error code, calculated exchange rate scaled by 1e18)
    */
   function exchangeRateStoredInternal() internal view returns (uint256) {
-    if (!isCToken) {
+    if (!isCToken()) {
       return initialExchangeRateMantissa;
     }
 
@@ -358,11 +450,11 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
    */
   function accrueInterest() public virtual override returns (uint256) {
     /* Remember the initial block number */
-    uint256 currentBlockNumber = getBlockNumber();
-    uint256 accrualBlockNumberPrior = accrualBlockNumber;
+    uint256 currentBlockTimestamp = getBlockTimestamp();
+    uint256 accrualBlockTimestampPrior = accrualBlockTimestamp;
 
     /* Short-circuit accumulating 0 interest */
-    if (accrualBlockNumberPrior == currentBlockNumber) {
+    if (accrualBlockTimestampPrior == currentBlockTimestamp) {
       return uint256(0);
     }
 
@@ -381,7 +473,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     // require(borrowRateMantissa <= borrowRateMaxMantissa, 'borrow rate is absurdly high');
 
     /* Calculate the number of blocks elapsed since the last accrual */
-    uint blockDelta = currentBlockNumber - accrualBlockNumberPrior;
+    uint blockDelta = currentBlockTimestamp - accrualBlockTimestampPrior;
 
     /*
      * Calculate the interest accumulated into borrows and reserves and the new index:
@@ -407,7 +499,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     // (No safe failures beyond this point)
 
     /* We write the previously calculated values into storage */
-    accrualBlockNumber = currentBlockNumber;
+    accrualBlockTimestamp = currentBlockTimestamp;
     borrowIndex = borrowIndexNew;
     totalBorrows = totalBorrowsNew;
     totalReserves = totalReservesNew;
@@ -442,7 +534,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     IComptroller(comptroller).mintAllowed(address(this), minter, mintAmount);
 
     /* Verify market's block number equals current block number */
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert MintMarketNotFresh();
     }
 
@@ -566,12 +658,12 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     IComptroller(comptroller).redeemAllowed(address(this), redeemer, redeemTokens);
 
     /* Verify market's block number equals current block number */
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert RedeemMarketNotFresh();
     }
 
     /* Fail gracefully if protocol has insufficient cash */
-    if (isCToken && (getCashPrior() < redeemAmount)) {
+    if (isCToken() && (getCashPrior() < redeemAmount)) {
       revert RedeemTransferOutNotPossible();
     }
 
@@ -601,7 +693,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     emit Redeem(redeemer, redeemAmount, redeemTokens);
 
     /* We call the defense hook */
-    // IComptroller(comptroller).redeemVerify(address(this), redeemer, redeemAmount, redeemTokens);
+    IComptroller(comptroller).redeemVerify(address(this), redeemer, redeemAmount, redeemTokens);
 
     return uint256(0);
   }
@@ -627,12 +719,12 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     IComptroller(comptroller).borrowAllowed(address(this), borrower, borrowAmount);
 
     /* Verify market's block number equals current block number */
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert BorrowMarketNotFresh();
     }
 
     /* Fail gracefully if protocol has insufficient underlying cash */
-    if (isCToken && (getCashPrior() < borrowAmount)) {
+    if (isCToken() && (getCashPrior() < borrowAmount)) {
       revert BorrowCashNotAvailable();
     }
 
@@ -715,12 +807,12 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     IComptroller(comptroller).repayBorrowAllowed(address(this), payer, borrower, repayAmount);
 
     /* Verify market's block number equals current block number */
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert RepayBorrowMarketNotFresh();
     }
 
     /* We remember the original borrowerIndex for verification purposes */
-    uint256 borrowerIndex = accountBorrows[borrower].interestIndex;
+    // uint256 borrowerIndex = accountBorrows[borrower].interestIndex;
 
     /* We fetch the amount the borrower owes, with accumulated interest */
     uint accountBorrowsPrev = borrowBalanceStoredInternal(borrower);
@@ -758,7 +850,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     emit RepayBorrow(payer, borrower, actualRepayAmount, accountBorrowsNew, totalBorrowsNew);
 
     /* We call the defense hook */
-    // IComptroller(comptroller).repayBorrowVerify(address(this), payer, borrower, actualRepayAmount, borrowerIndex);
+    IComptroller(comptroller).repayBorrowVerify(address(this), payer, borrower, actualRepayAmount, borrowIndex);
 
     return (uint256(0), actualRepayAmount);
   }
@@ -808,12 +900,12 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     );
 
     /* Verify market's block number equals current block number */
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert LiquidateMarketNotFresh();
     }
 
     /* Verify cTokenCollateral market's block number equals current block number */
-    if (ICToken(cTokenCollateral).accrualBlockNumber() != getBlockNumber()) {
+    if (ICToken(cTokenCollateral).accrualBlockTimestamp() != getBlockTimestamp()) {
       revert LiquidateCollateralMarketNotFresh();
     }
 
@@ -861,7 +953,14 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
 
     /* We call the defense hook */
     // unused function
-    // comptroller.liquidateBorrowVerify(address(this), address(cTokenCollateral), liquidator, borrower, actualRepayAmount, seizeTokens);
+    IComptroller(comptroller).liquidateBorrowVerify(
+      address(this),
+      address(cTokenCollateral),
+      liquidator,
+      borrower,
+      actualRepayAmount,
+      seizeTokens
+    );
 
     return (uint256(0), actualRepayAmount);
   }
@@ -1070,7 +1169,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
    */
   function _setReserveFactorFresh(uint256 newReserveFactorMantissa) internal onlyAdmin returns (uint256) {
     // Verify market's block number equals current block number
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert SetReservesFactorMarketNotFresh();
     }
 
@@ -1111,7 +1210,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     uint256 actualAddAmount;
 
     // We fail gracefully unless market's block number equals current block number
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert AddReservesMarketNotFresh();
     }
 
@@ -1168,7 +1267,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     uint256 totalReservesNew;
 
     // We fail gracefully unless market's block number equals current block number
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert ReduceReservesMarketNotFresh();
     }
 
@@ -1221,7 +1320,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     // Used to store old model for use in the event that is emitted on success
     address oldInterestRateModel;
     // We fail gracefully unless market's block number equals current block number
-    if (accrualBlockNumber != getBlockNumber()) {
+    if (accrualBlockTimestamp != getBlockTimestamp()) {
       revert SetInterestRateModelMarketNotFresh();
     }
 
@@ -1242,7 +1341,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     return uint256(0);
   }
 
-  function _syncUnderlyingBalance() virtual external onlyAdmin {
+  function _syncUnderlyingBalance() external virtual onlyAdmin {
     underlyingBalance = ICToken(underlying).balanceOf(address(this));
   }
 
@@ -1287,10 +1386,11 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
    * @dev All borrows in a deprecated cToken market can be immediately liquidated
    */
   function isDeprecated() public view returns (bool) {
+    (, uint8 assetGroupId, ) = IComptroller(comptroller).markets(address(this));
     return
-      IComptroller(comptroller).marketGroupId(address(this)) == 0 &&
+      assetGroupId == 0 &&
       //borrowGuardianPaused[cToken] == true &&
-      IComptroller(comptroller).borrowGuardianPaused(address(this)) &&
+      IComptroller(comptroller).marketConfig(address(this)).borrowPaused &&
       reserveFactorMantissa == 1e18;
   }
 
@@ -1310,21 +1410,17 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     (bool seizeListed, uint8 seizeTokenGroupId, ) = IComptroller(comptroller).markets(cTokenCollateral);
     require(seizeListed, 'seize token not listed');
 
-    (
-      uint256 heteroLiquidationIncentive,
-      uint256 homoLiquidationIncentive,
-      uint256 sutokenLiquidationIncentive
-    ) = IComptroller(comptroller).liquidationIncentiveMantissa();
+    LiquidationIncentive memory liquidationIncentive = IComptroller(comptroller).liquidationIncentive();
 
     // default is repaying heterogeneous assets
-    uint256 liquidationIncentiveMantissa = heteroLiquidationIncentive;
+    uint256 liquidationIncentiveMantissa = uint256(liquidationIncentive.heteroPercent) * percentScale;
     if (repayTokenGroupId == seizeTokenGroupId) {
       if (CToken(address(this)).isCToken() == false) {
         // repaying sutoken
-        liquidationIncentiveMantissa = sutokenLiquidationIncentive;
+        liquidationIncentiveMantissa = uint256(liquidationIncentive.sutokenPercent) * percentScale;
       } else {
         // repaying homogeneous assets
-        liquidationIncentiveMantissa = homoLiquidationIncentive;
+        liquidationIncentiveMantissa = uint256(liquidationIncentive.homoPercent) * percentScale;
       }
     }
 
@@ -1371,7 +1467,7 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
       revert NotSuToken();
     }
     // only cToken has this function
-    if (!isCToken) {
+    if (!isCToken()) {
       revert NotCToken();
     }
     if (!IComptroller(comptroller).isListed(msg.sender)) {
@@ -1397,5 +1493,30 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
 
   function getBorrowSnapshot(address borrower) external view returns (BorrowSnapshot memory) {
     return accountBorrows[borrower];
+  }
+
+  function isCToken() public pure virtual returns (bool) {
+    return true;
+  }
+  function isCEther() external pure virtual returns (bool) {
+    return false;
+  }
+
+  function initAccrualBlockTimestamp(address timeBasedInterestRateModel) public onlyAdmin {
+    if (accrualBlockTimestamp == 0) {
+      // make sure this interest rate model is time-based
+      IInterestRateModel(timeBasedInterestRateModel).secondsPerYear();
+
+      // set timestamp to current
+      accrualBlockTimestamp = getBlockTimestamp();
+
+      // update interest rate model to time-based
+      interestRateModel = timeBasedInterestRateModel;
+    } else {
+      accrueInterest();
+      if (accrualBlockTimestamp != getBlockTimestamp()) {
+        revert InvalidTimestamp();
+      }
+    }
   }
 }

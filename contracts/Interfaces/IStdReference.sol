@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 interface IStdReference {
   /// A structure returned whenever someone requests for standard reference data.
@@ -13,8 +13,8 @@ interface IStdReference {
   function getReferenceData(string calldata _base, string calldata _quote) external view returns (ReferenceData memory);
 
   /// Similar to getReferenceData, but with multiple base/quote pairs at once.
-  function getReferenceDataBulk(string[] calldata _bases, string[] calldata _quotes)
-    external
-    view
-    returns (ReferenceData[] memory);
+  function getReferenceDataBulk(
+    string[] calldata _bases,
+    string[] calldata _quotes
+  ) external view returns (ReferenceData[] memory);
 }

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 import './CToken.sol';
 import '../Interfaces/ICErc20.sol';
 import '@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol';
 import '../Interfaces/ITimelock.sol';
 import '../Interfaces/IEIP712.sol';
+import '../Interfaces/IEIP20NonStandard.sol';
 
 /**
  * @title Compound's CErc20 Contract
@@ -35,59 +36,19 @@ contract CErc20 is CToken, ICErc20, Initializable {
     string memory name_,
     string memory symbol_,
     uint8 decimals_,
-    address payable admin_,
-    uint256 discountRateMantissa_,
-    uint256 reserveFactorMantissa_
+    address payable admin_
   ) public virtual initializer {
-    initInternal(
-      underlying_,
-      comptroller_,
-      interestRateModel_,
-      initialExchangeRateMantissa_,
-      name_,
-      symbol_,
-      decimals_,
-      admin_,
-      discountRateMantissa_,
-      reserveFactorMantissa_
-    );
-  }
-
-  function initInternal(
-    address underlying_,
-    address comptroller_,
-    address interestRateModel_,
-    uint256 initialExchangeRateMantissa_,
-    string memory name_,
-    string memory symbol_,
-    uint8 decimals_,
-    address payable admin_,
-    uint256 discountRateMantissa_,
-    uint256 reserveFactorMantissa_
-  ) internal onlyInitializing {
     // CToken initialize does the bulk of the work
-    CToken.initialize(
-      comptroller_,
-      interestRateModel_,
-      initialExchangeRateMantissa_,
-      name_,
-      symbol_,
-      decimals_,
-      true,
-      admin_,
-      discountRateMantissa_,
-      reserveFactorMantissa_
-    );
-
-    isCEther = false;
+    CToken.init(comptroller_, interestRateModel_, initialExchangeRateMantissa_, name_, symbol_, decimals_, admin_);
 
     // Set underlying and sanity check it
     if (underlying_ == address(0)) {
       revert InvalidAddress();
     }
     underlying = underlying_;
-    // ICToken(underlying).totalSupply();
   }
+
+  function initializeVersion2() public virtual reinitializer(2) onlyAdmin {}
 
   /*** User Interface ***/
 
@@ -173,13 +134,13 @@ contract CErc20 is CToken, ICErc20, Initializable {
    * @notice A public function to sweep accidental ERC-20 transfers to this contract. Tokens are sent to admin (timelock)
    * @param token The address of the ERC-20 token to sweep
    */
-  function sweepToken(address token) external override {
+  function sweepToken(IEIP20NonStandard token) external override {
     if (address(token) == underlying) {
       revert CantSweepUnderlying();
     }
     uint256 underlyingBalanceBefore = ICToken(underlying).balanceOf(address(this));
-    uint256 balance = ICToken(token).balanceOf(address(this));
-    ICToken(token).transfer(admin, balance);
+    uint256 balance = token.balanceOf(address(this));
+    token.transfer(admin, balance);
     uint256 underlyingBalanceAfter = ICToken(underlying).balanceOf(address(this));
     if (underlyingBalanceBefore != underlyingBalanceAfter) {
       revert UnderlyingBalanceError();
@@ -218,7 +179,7 @@ contract CErc20 is CToken, ICErc20, Initializable {
    *            See here: https://medium.com/coinmonks/missing-return-value-bug-at-least-130-tokens-affected-d67bf08521ca
    */
   function doTransferIn(address from, uint256 amount) internal virtual override returns (uint256) {
-    ICToken token = ICToken(underlying);
+    IEIP20NonStandard token = IEIP20NonStandard(underlying);
     uint256 balanceBefore = ICToken(underlying).balanceOf(address(this));
     token.transferFrom(from, address(this), amount);
 
@@ -263,7 +224,7 @@ contract CErc20 is CToken, ICErc20, Initializable {
    *            See here: https://medium.com/coinmonks/missing-return-value-bug-at-least-130-tokens-affected-d67bf08521ca
    */
   function doTransferOut(address payable to, uint256 amount) internal virtual override {
-    ICToken token = ICToken(underlying);
+    IEIP20NonStandard token = IEIP20NonStandard(underlying);
     token.transfer(to, amount);
     underlyingBalance -= amount;
 
@@ -280,7 +241,7 @@ contract CErc20 is CToken, ICErc20, Initializable {
         success := mload(0) // Set `success = returndata` of external call
       }
       default {
-        // This is an excessively non-compliant ERC-20, revert.
+        // This is an excessively non-compliant ERC-20, reveforceApprovert.
         revert(0, 0)
       }
     }
@@ -291,9 +252,10 @@ contract CErc20 is CToken, ICErc20, Initializable {
 
   function transferToTimelock(bool isBorrow, address to, uint256 underlyAmount) internal virtual override {
     address timelock = IComptroller(comptroller).timelock();
-
-    if (ITimelock(timelock).consumeValuePreview(underlyAmount, address(this))) {
-      ITimelock(timelock).consumeValue(underlyAmount);
+    bytes memory data = abi.encodeWithSignature('consumeValue(uint256)', underlyAmount);
+    (bool success, ) = timelock.call(data);
+    if (success) {
+      // ITimelock(timelock).consumeValue(underlyAmount);
       doTransferOut(payable(to), underlyAmount);
     } else {
       doTransferOut(payable(timelock), underlyAmount);
@@ -330,5 +292,12 @@ contract CErc20 is CToken, ICErc20, Initializable {
     IEIP712(underlying).permit(msg.sender, address(this), repayAmount, deadline, signature);
     (uint256 err, ) = repayBorrowInternal(repayAmount);
     return err;
+  }
+
+  function isCToken() public pure virtual override returns (bool) {
+    return true;
+  }
+  function isCEther() external pure virtual override returns (bool) {
+    return false;
   }
 }

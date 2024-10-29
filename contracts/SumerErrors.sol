@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity =0.8.19;
+pragma solidity ^0.8.19;
 
 /// @title Multicall2 - Aggregate results from multiple read-only function calls
 /// @author Michael Elliot <mike@makerdao.com>
@@ -9,17 +9,22 @@ pragma solidity =0.8.19;
 contract SumerErrors {
   error PriceError();
 
+  error TotalBorrowsNotZero();
+  error TotalSupplyNotZero();
   error RedemptionSignerNotInitialized();
   error NotEnoughForSeize();
   error NoRedemptionProvider();
+  error OnlyPausedMarketCanBeUnlisted();
   error MarketNotListed();
   error InsufficientShortfall();
   error TooMuchRepay();
-  error OneOfRedeemTokensAndRedeemAmountMustBeZero();
+  error InvalidCToken();
+  error MarketNotEmpty();
   error InvalidMinSuBorrowValue();
   error BorrowValueMustBeLargerThanThreshold(uint256 usdThreshold);
-  error ProtocolIsPaused();
+  error OverThreshold();
   error MarketAlreadyListed();
+  error MarketAlreadyUnlisted();
   error InvalidAddress();
   error InvalidGroupId();
   error InvalidCloseFactor();
@@ -29,10 +34,10 @@ contract SumerErrors {
   error SenderMustBeCToken();
   error MintPaused();
   error BorrowPaused();
+  error MarketPaused();
   error TransferPaused();
   error SeizePaused();
   error InsufficientCollateral();
-  error GroupIdMismatch();
   error EitherAssetOrDebtMustBeZeroInGroup(
     uint8 groupId,
     uint256 cDepositVal,
@@ -42,7 +47,6 @@ contract SumerErrors {
   );
   error EitherAssetOrDebtMustBeZero();
 
-  error OnlyAdminOrCapper();
   error OnlyAdminOrPauser();
 
   // general errors
@@ -59,10 +63,11 @@ contract SumerErrors {
   error TransferNotAllowed();
   error TokenInOrAmountInMustBeZero();
   error AddReservesOverflow();
-  error ReduceReservesOverflow();
   error RedeemTransferOutNotPossible();
   error BorrowCashNotAvailable();
   error ReduceReservesCashNotAvailable();
+  error InvalidRedeem();
+  error CantEnterPausedMarket();
   error InvalidDiscountRate();
   error InvalidExchangeRate();
   error InvalidReduceAmount();
@@ -90,6 +95,8 @@ contract SumerErrors {
   error SetReservesFactorMarketNotFresh();
   error CantExitMarketWithNonZeroBorrowBalance();
 
+  error InvalidTimestamp();
+
   // error
   error NotCToken();
   error NotSuToken();
@@ -111,4 +118,8 @@ contract SumerErrors {
   error MinDelayNotReached();
 
   error NotLiquidatableYet();
+
+  error InvalidBlockNumber();
+  error ZeroAddressNotAllowed();
+  error InterMintNotAllowed();
 }

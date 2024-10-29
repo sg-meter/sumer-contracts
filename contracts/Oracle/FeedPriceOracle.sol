@@ -1,118 +1,268 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 import './PriceOracle.sol';
-import '../Interfaces/IStdReference.sol';
-import '../Interfaces/IWitnetFeed.sol';
-import '../Interfaces/IChainlinkFeed.sol';
-import '../Interfaces/IVoltPair.sol';
+import '../Interfaces/IPendlePtOracle.sol';
+import '../Interfaces/IPMarket.sol';
+import '../Interfaces/IPPrincipalToken.sol';
+import '../Interfaces/IPYieldToken.sol';
+import '../Interfaces/IStandardizedYield.sol';
+import '@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol';
 import '@pythnetwork/pyth-sdk-solidity/IPyth.sol';
 import '@openzeppelin/contracts/access/Ownable2Step.sol';
+import '@openzeppelin/contracts/access/Ownable.sol';
 import '@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol';
 import '@openzeppelin/contracts/utils/math/SafeMath.sol';
+import '../Interfaces/ICTokenExternal.sol';
+
+error ZeroAddressNotAllowed();
+error ZeroValueNotAllowed();
+
+error EmptyPythOracle(); // thrown when pythOracle is empty
+error EmptyPendlePtOracle(); // thrown when pendlePtOralce is empty
+
+error UnknownSource(); // thrown when source is unknown during getPrice
+error UnsupportedSource(); // thrown when source is not supported during getPrice
+
+// sanity checks
+error InvalidFeedDecimals();
+error EmptyFeedAddress();
+error EmptyAdapterAddress();
+error EmptyMaxStalePeriod();
+
+error InvalidPrice(); // thrown when price is 0
+
+/// @notice Checks if the provided address is nonzero, reverts otherwise
+/// @param address_ Address to check
+/// @custom:error ZeroAddressNotAllowed is thrown if the provided address is a zero address
+function ensureNonzeroAddress(address address_) pure {
+  if (address_ == address(0)) {
+    revert ZeroAddressNotAllowed();
+  }
+}
+
+/// @notice Checks if the provided value is nonzero, reverts otherwise
+/// @param value_ Value to check
+/// @custom:error ZeroValueNotAllowed is thrown if the provided value is 0
+function ensureNonzeroValue(uint256 value_) pure {
+  if (value_ == 0) {
+    revert ZeroValueNotAllowed();
+  }
+}
 
 contract FeedPriceOracle is PriceOracle, Ownable2Step {
   using SafeMath for uint256;
-  struct FeedData {
-    bytes32 feedId; // Pyth price feed ID
-    uint8 source; // 1 - chainlink feed, 2 - witnet router, 3 - Band
-    address addr; // feed address
+
+  enum Source {
+    Unknown,
+    Chainlink,
+    RedStone,
+    Pyth,
+    Pendle,
+    FixedPrice,
+    Adapter
+  }
+
+  struct ChainlinkFeed {
+    address feedAddr; // feed address
+    address denominator; // price will be denominated by this address, address(0) means USD
     uint8 feedDecimals; // feed decimals (only used in witnet)
-    string name;
+    uint32 maxStalePeriod; //  Price expiration period of this asset
   }
 
-  mapping(address => FeedData) public feeds; // cToken -> feed data
-  mapping(address => uint256) public fixedPrices; // cToken -> price
+  struct PythFeed {
+    bytes32 feedId;
+    uint32 maxStalePeriod;
+  }
+
+  struct PendleFeed {
+    address market;
+    address yieldToken;
+    uint32 twapDuration;
+  }
+
+  struct AdapterFeed {
+    address adapterAddr;
+    address denominator;
+  }
+
+  event NewFeed(address indexed asset, Source source, uint8 feedDecimals, uint32 maxStalePeriod, bytes32 metadata);
+  event NewPythOracle(address oldValue, address newValue);
+  event NewPendlePtOracle(address oldValue, address newValue);
+
+  address public immutable nativeMarket;
+  address public immutable nativeAsset;
+
+  IPyth public pythOracle;
+  IPendlePtOracle public pendlePtOracle;
+  mapping(address => ChainlinkFeed) public chainlinkFeeds; // asset -> chainlink feeds
+  mapping(address => ChainlinkFeed) public redstoneFeeds; // asset -> redstone feeds
+  mapping(address => PythFeed) public pythFeeds; // asset -> pyth feeds
+  mapping(address => PendleFeed) public pendleFeeds; // asset -> pendle feeds
+  mapping(address => uint256) public fixedPrices; // asset -> price
+  mapping(address => AdapterFeed) public adapterFeeds; // asset -> adapter feeds
+
+  mapping(address => Source) public mainSource; // asset -> source
   uint8 constant DECIMALS = 18;
+  uint256 constant EXP_SCALE = 10 ** 18;
 
-  event SetFeed(address indexed cToken_, bytes32 feedId, uint8 source, address addr, uint8 feedDecimals, string name);
-
-  function setChainlinkFeed(address cToken_, address feed_) public onlyOwner {
-    _setFeed(cToken_, uint8(1), bytes32(0), feed_, 8, '');
-  }
-
-  function setWitnetFeed(address cToken_, address feed_, uint8 feedDecimals_) public onlyOwner {
-    _setFeed(cToken_, uint8(2), bytes32(0), feed_, feedDecimals_, '');
-  }
-
-  function setBandFeed(address cToken_, address feed_, uint8 feedDecimals_, string memory name) public onlyOwner {
-    _setFeed(cToken_, uint8(3), bytes32(0), feed_, feedDecimals_, name);
-  }
-
-  function setFixedPrice(address cToken_, uint256 price) public onlyOwner {
-    fixedPrices[cToken_] = price;
-  }
-
-  function setPythFeed(address cToken_, bytes32 feedId, address addr) public onlyOwner {
-    _setFeed(cToken_, uint8(4), feedId, addr, 18, '');
-  }
-
-  function setLpFeed(address cToken_, address lpToken) public onlyOwner {
-    _setFeed(cToken_, uint8(5), bytes32(0), lpToken, 18, '');
-  }
-
-  function _setFeed(
-    address cToken_,
-    uint8 source,
-    bytes32 feedId,
-    address addr,
-    uint8 feedDecimals,
-    string memory name
-  ) private {
-    require(addr != address(0), 'invalid address');
-    if (feeds[cToken_].source != 0) {
-      delete fixedPrices[cToken_];
+  constructor(
+    address admin,
+    address nativeMarket_,
+    address nativeAsset_,
+    IPyth pythOracle_,
+    IPendlePtOracle pendlePtOracle_
+  ) {
+    pythOracle = pythOracle_;
+    nativeMarket = nativeMarket_;
+    nativeAsset = nativeAsset_;
+    if (address(pythOracle_) != address(0)) {
+      emit NewPythOracle(address(0), address(pythOracle));
     }
-    FeedData memory feedData = FeedData({
-      feedId: feedId,
-      source: source,
-      addr: addr,
-      feedDecimals: feedDecimals,
-      name: name
+
+    pendlePtOracle = pendlePtOracle_;
+    if (address(pendlePtOracle_) != address(0)) {
+      emit NewPendlePtOracle(address(0), address(pendlePtOracle));
+    }
+
+    _transferOwnership(admin);
+  }
+
+  ///////////////////////////////////////////////////
+  // Chainlink
+  ///////////////////////////////////////////////////
+  function setChainlinkFeed(
+    address asset,
+    address feedAddr,
+    uint32 maxStalePeriod,
+    address denominator
+  ) public onlyOwner {
+    uint8 decimals = AggregatorV3Interface(feedAddr).decimals();
+    if (feedAddr == address(0)) {
+      revert EmptyFeedAddress();
+    }
+    if (decimals == 0) {
+      revert InvalidFeedDecimals();
+    }
+    if (maxStalePeriod == 0) {
+      revert EmptyMaxStalePeriod();
+    }
+
+    chainlinkFeeds[asset] = ChainlinkFeed({
+      feedAddr: feedAddr,
+      feedDecimals: decimals,
+      maxStalePeriod: maxStalePeriod,
+      denominator: denominator
     });
-    feeds[cToken_] = feedData;
-    emit SetFeed(cToken_, feedId, source, addr, feedDecimals, name);
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.Chainlink;
+    }
   }
 
-  function _getTokenPrice(address lpToken, address token) private view returns (uint256) {
-    uint256 _balance = IERC20(token).balanceOf(lpToken);
+  function _getChainlinkPrice(ChainlinkFeed memory feedData) internal view returns (uint256) {
+    AggregatorV3Interface feed = AggregatorV3Interface(feedData.feedAddr);
 
-    uint8 decimals = IERC20Metadata(token).decimals();
+    // note: maxStalePeriod cannot be 0
+    uint256 maxStalePeriod = feedData.maxStalePeriod;
 
-    uint256 _totalSupply = IERC20(lpToken).totalSupply();
-    uint256 amount = (_balance * 1e18) / _totalSupply;
+    // Chainlink USD-denominated feeds store answers at 8 decimals, mostly
+    uint256 decimalDelta = 18 - feedData.feedDecimals;
 
-    uint256 price = getUnderlyingPrice(token);
+    (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
+    if (answer <= 0) revert('chainlink price must be positive');
+    if (block.timestamp < updatedAt) revert('updatedAt exceeds block time');
 
-    if (decimals < 18) amount = amount * (10 ** (18 - decimals));
-    return (amount * price) / 1e18;
+    uint256 deltaTime;
+    unchecked {
+      deltaTime = block.timestamp - updatedAt;
+    }
+
+    if (deltaTime > maxStalePeriod) revert('chainlink price expired');
+
+    uint256 price = uint256(answer) * (10 ** decimalDelta);
+    if (feedData.denominator != address(0)) {
+      price = (price * getPrice(feedData.denominator)) / EXP_SCALE;
+    }
+    return price;
   }
 
-  function _getLpPrice(address lpToken) private view returns (uint256) {
-    address token0 = IVoltPair(lpToken).token0();
-    address token1 = IVoltPair(lpToken).token1();
-
-    return _getTokenPrice(lpToken, token0) + _getTokenPrice(lpToken, token1);
+  function removeChainlinkFeed(address asset) public onlyOwner {
+    delete chainlinkFeeds[asset];
+    if (mainSource[asset] == Source.Chainlink) {
+      mainSource[asset] = Source.Unknown;
+    }
   }
 
-  function removeFeed(address cToken_) public onlyOwner {
-    delete feeds[cToken_];
+  ///////////////////////////////////////////////////
+  // RedStone
+  ///////////////////////////////////////////////////
+  function setRedStoneFeed(
+    address asset,
+    address feedAddr,
+    uint32 maxStalePeriod,
+    address denominator
+  ) public onlyOwner {
+    uint8 decimals = AggregatorV3Interface(feedAddr).decimals();
+    if (feedAddr == address(0)) {
+      revert EmptyFeedAddress();
+    }
+    if (decimals == 0) {
+      revert InvalidFeedDecimals();
+    }
+    if (maxStalePeriod == 0) {
+      revert EmptyMaxStalePeriod();
+    }
+
+    redstoneFeeds[asset] = ChainlinkFeed({
+      feedAddr: feedAddr,
+      feedDecimals: decimals,
+      maxStalePeriod: maxStalePeriod,
+      denominator: denominator
+    });
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.RedStone;
+    }
   }
 
-  function getFeed(address cToken_) public view returns (FeedData memory) {
-    return feeds[cToken_];
+  function removeRedstoneFeed(address asset) public onlyOwner {
+    delete redstoneFeeds[asset];
+    if (mainSource[asset] == Source.RedStone) {
+      mainSource[asset] = Source.Unknown;
+    }
   }
 
-  function removeFixedPrice(address cToken_) public onlyOwner {
-    delete fixedPrices[cToken_];
+  ///////////////////////////////////////////////////
+  // Pyth
+  ///////////////////////////////////////////////////
+  function setPythOracle(IPyth pythOracle_) public onlyOwner {
+    address oldValue = address(pythOracle);
+    ensureNonzeroAddress(address(pythOracle_));
+    pythOracle = pythOracle_;
+    emit NewPythOracle(oldValue, address(pythOracle));
   }
 
-  function getFixedPrice(address cToken_) public view returns (uint256) {
-    return fixedPrices[cToken_];
+  function setPythFeed(address asset, uint32 maxStalePeriod, bytes32 feedId) public onlyOwner {
+    if (address(pythOracle) == address(0)) {
+      revert EmptyPythOracle();
+    }
+
+    // sanity check
+    if (maxStalePeriod == 0) {
+      revert EmptyMaxStalePeriod();
+    }
+
+    pythFeeds[asset] = PythFeed({feedId: feedId, maxStalePeriod: maxStalePeriod});
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.Pyth;
+    }
   }
 
-  function _getPythPrice(FeedData memory feed) internal view virtual returns (uint256) {
-    (bool success, bytes memory message) = feed.addr.staticcall(
-      abi.encodeWithSelector(IPyth.getPriceUnsafe.selector, feed.feedId)
+  function _getPythPrice(PythFeed memory feedData) internal view returns (uint256) {
+    if (address(pythOracle) == address(0)) {
+      revert EmptyPythOracle();
+    }
+
+    (bool success, bytes memory message) = address(pythOracle).staticcall(
+      abi.encodeWithSelector(IPyth.getPriceNoOlderThan.selector, feedData.feedId, feedData.maxStalePeriod)
     );
     require(success, 'pyth error');
     (int64 price, , int32 expo, ) = (abi.decode(message, (int64, uint64, int32, uint256)));
@@ -121,56 +271,170 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     return uint64(price) * (10 ** decimals);
   }
 
-  function getUnderlyingPrice(address cToken_) public view override returns (uint256) {
-    FeedData memory feed = feeds[cToken_]; // gas savings
-    if (feed.addr != address(0)) {
-      if (feed.source == uint8(1)) {
-        uint256 decimals = uint256(DECIMALS - IChainlinkFeed(feed.addr).decimals());
-        require(decimals <= DECIMALS, 'decimal underflow');
-        (uint80 roundID, int256 answer, , uint256 updatedAt, uint80 answeredInRound) = IChainlinkFeed(feed.addr)
-          .latestRoundData();
-        require(answeredInRound >= roundID, 'stale price');
-        require(answer > 0, 'negative price');
-        require(block.timestamp <= updatedAt + 86400, 'timeout');
-        return uint256(answer) * (10 ** decimals);
-      }
-      if (feed.source == uint8(2)) {
-        uint256 decimals = uint256(DECIMALS - feed.feedDecimals);
-        require(decimals <= DECIMALS, 'decimal underflow');
-        uint256 _temp = uint256(IWitnetFeed(feed.addr).lastPrice());
-        return _temp * (10 ** decimals);
-      }
-      if (feed.source == uint8(3)) {
-        uint256 decimals = uint256(DECIMALS - feed.feedDecimals);
-        require(decimals <= DECIMALS, 'decimal underflow');
-        IStdReference.ReferenceData memory refData = IStdReference(feed.addr).getReferenceData(feed.name, 'USD');
-        return refData.rate * (10 ** decimals);
-      }
-      if (feed.source == uint8(4)) {
-        return _getPythPrice(feed);
-      }
-      if (feed.source == uint8(5)) {
-        return _getLpPrice(feed.addr);
-      }
+  function removePythFeed(address asset) public onlyOwner {
+    delete pythFeeds[asset];
+    if (mainSource[asset] == Source.Pyth) {
+      mainSource[asset] = Source.Unknown;
     }
-    return fixedPrices[cToken_];
   }
 
-  // function getUnderlyingPriceNormalized(address cToken_) public view returns (uint256) {
-  //   uint256 cPriceMantissa = getUnderlyingPrice(cToken_);
+  ///////////////////////////////////////////////////
+  // Pendle
+  ///////////////////////////////////////////////////
+  function setPendlePtOracle(IPendlePtOracle pendlePtOracle_) public onlyOwner {
+    address oldValue = address(pendlePtOracle);
+    ensureNonzeroAddress(address(pendlePtOracle_));
+    pendlePtOracle = pendlePtOracle_;
+    emit NewPendlePtOracle(oldValue, address(pendlePtOracle));
+  }
 
-  //   uint256 decimals = IERC20Metadata(cToken_).decimals();
-  //   if (decimals < 18) {
-  //     cPriceMantissa = cPriceMantissa.mul(10 ** (18 - decimals));
-  //   }
-  //   return cPriceMantissa;
-  // }
+  function setPendleFeed(address asset, address market, uint32 twapDuration, address yieldToken) public onlyOwner {
+    if (address(pendlePtOracle) == address(0)) {
+      revert EmptyPendlePtOracle();
+    }
 
-  // function getUnderlyingUSDValue(address cToken_, uint256 amount) external view returns (uint256) {
-  //   uint256 cPriceMantissa = getUnderlyingPriceNormalized(cToken_);
+    // sanity check
+    ensureNonzeroAddress(market);
+    ensureNonzeroAddress(yieldToken);
+    ensureNonzeroValue(uint256(twapDuration));
+    (IStandardizedYield sy, IPPrincipalToken pt, ) = IPMarket(market).readTokens();
+    if (asset != address(pt)) revert('pt mismatch');
+    if (pt.SY() != address(sy)) revert('sy mismatch');
+    if (sy.yieldToken() != yieldToken) revert('yieldToken mismatch');
 
-  //   return cPriceMantissa * amount;
-  // }
+    pendleFeeds[asset] = PendleFeed({market: market, twapDuration: twapDuration, yieldToken: yieldToken});
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.Pendle;
+    }
+  }
+
+  function _getPendlePrice(PendleFeed memory feedData) internal view returns (uint256) {
+    if (address(pendlePtOracle) == address(0)) {
+      revert EmptyPendlePtOracle();
+    }
+    uint256 rate = pendlePtOracle.getPtToSyRate(feedData.market, feedData.twapDuration);
+    return (getPrice(feedData.yieldToken) * rate) / EXP_SCALE;
+  }
+
+  function removePendleFeed(address asset) public onlyOwner {
+    delete pendleFeeds[asset];
+    if (mainSource[asset] == Source.Pendle) {
+      mainSource[asset] = Source.Unknown;
+    }
+  }
+
+  ///////////////////////////////////////////////////
+  // FixedPrice
+  ///////////////////////////////////////////////////
+  function setFixedPrice(address asset, uint256 price) public onlyOwner {
+    ensureNonzeroAddress(asset);
+    ensureNonzeroValue(price);
+    fixedPrices[asset] = price;
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.FixedPrice;
+    }
+  }
+
+  function getFixedPrice(address asset) public view returns (uint256) {
+    return fixedPrices[asset];
+  }
+
+  function removeFixedPrice(address asset) public onlyOwner {
+    delete fixedPrices[asset];
+    if (mainSource[asset] == Source.FixedPrice) {
+      mainSource[asset] = Source.Unknown;
+    }
+  }
+
+  ///////////////////////////////////////////////////
+  // Adapter
+  ///////////////////////////////////////////////////
+  function setAdapterFeed(address asset, address adapterAddr, address denominator) public onlyOwner {
+    if (adapterAddr == address(0)) {
+      revert EmptyAdapterAddress();
+    }
+    adapterFeeds[asset] = AdapterFeed({adapterAddr: adapterAddr, denominator: denominator});
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.Adapter;
+    }
+  }
+
+  function _getAdapterPrice(AdapterFeed memory feedData) internal view returns (uint256) {
+    uint256 price = PriceAdapter(feedData.adapterAddr).exchangeRate();
+    if (feedData.denominator != address(0)) {
+      price = (price * getPrice(feedData.denominator)) / EXP_SCALE;
+    }
+    return price;
+  }
+
+  function removeAdapterFeed(address asset) public onlyOwner {
+    delete fixedPrices[asset];
+    if (mainSource[asset] == Source.Adapter) {
+      mainSource[asset] = Source.Unknown;
+    }
+  }
+
+  ///////////////////////////////////////////////////
+  // Set Main Source
+  ///////////////////////////////////////////////////
+  function setMainSource(address asset, Source source) public onlyOwner {
+    mainSource[asset] = source;
+  }
+
+  ///////////////////////////////////////////////////
+  // GET PRICE
+  ///////////////////////////////////////////////////
+  function getPrice(address asset) public view override returns (uint256) {
+    Source source = mainSource[asset];
+    if (source == Source.Unknown) {
+      revert UnknownSource();
+    }
+
+    uint256 price;
+
+    if (source == Source.Chainlink) {
+      // Chainlink
+      ChainlinkFeed memory feedData = chainlinkFeeds[asset];
+      price = _getChainlinkPrice(feedData);
+    } else if (source == Source.RedStone) {
+      // RedStone
+      ChainlinkFeed memory feedData = redstoneFeeds[asset];
+      price = _getChainlinkPrice(feedData);
+    } else if (source == Source.Pyth) {
+      // Pyth
+      PythFeed memory feedData = pythFeeds[asset];
+      price = _getPythPrice(feedData);
+    } else if (source == Source.Pendle) {
+      // Pendle
+      PendleFeed memory feedData = pendleFeeds[asset];
+      price = _getPendlePrice(feedData);
+    } else if (source == Source.FixedPrice) {
+      // Fixed Price
+      price = fixedPrices[asset];
+    } else if (source == Source.Adapter) {
+      // Adapter
+      AdapterFeed memory feedData = adapterFeeds[asset];
+      price = _getAdapterPrice(feedData);
+    } else {
+      revert UnsupportedSource();
+    }
+
+    if (price == uint256(0)) {
+      revert InvalidPrice();
+    }
+    return price;
+  }
+
+  function getUnderlyingPrice(address ctoken) public view override returns (uint256) {
+    address asset;
+    if (ctoken == nativeMarket) {
+      asset = nativeAsset;
+    } else {
+      asset = ICToken(ctoken).underlying();
+    }
+
+    return getPrice(asset);
+  }
 
   function getUnderlyingPrices(address[] memory cTokens) public view returns (uint256[] memory) {
     uint256 length = cTokens.length;

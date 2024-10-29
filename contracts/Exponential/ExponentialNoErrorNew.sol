@@ -11,8 +11,6 @@ pragma solidity ^0.8.19;
 contract ExponentialNoErrorNew {
   uint constant expScale = 1e18;
   uint constant doubleScale = 1e36;
-  uint constant halfExpScale = expScale / 2;
-  uint constant mantissaOne = expScale;
 
   struct Exp {
     uint mantissa;

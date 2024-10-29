@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 import '../Exponential/ExponentialNoErrorNew.sol';
 import '../Interfaces/IComptroller.sol';
 import '../Interfaces/ICTokenExternal.sol';
 import '@openzeppelin/contracts-upgradeable/access/AccessControlEnumerableUpgradeable.sol';
+import '../SumerErrors.sol';
 
-contract CompLogic is AccessControlEnumerableUpgradeable, ExponentialNoErrorNew {
+contract CompLogic is AccessControlEnumerableUpgradeable, ExponentialNoErrorNew, SumerErrors {
   /// @notice The market's last updated compBorrowIndex or compSupplyIndex
   /// @notice The block number the index was last updated at
   struct CompMarketState {
     uint224 index;
     uint32 block;
   }
+  uint256 public constant percentScale = 1e14;
   address public comp;
 
   IComptroller public comptroller;
@@ -388,6 +390,15 @@ contract CompLogic is AccessControlEnumerableUpgradeable, ExponentialNoErrorNew 
     supplyState.block = borrowState.block = blockNumber;
   }
 
+  function uninitializeMarket(address cToken) external onlyComptroller {
+    if (compSupplyState[cToken].index == compInitialIndex) {
+      delete compSupplyState[cToken];
+    }
+    if (compSupplyState[cToken].index == compInitialIndex) {
+      delete compBorrowState[cToken];
+    }
+  }
+
   /*** Comp Distribution Admin ***/
   /**
    * @notice Transfer COMP to the recipient
@@ -503,5 +514,279 @@ contract CompLogic is AccessControlEnumerableUpgradeable, ExponentialNoErrorNew 
       accrued = accrued + supplierDelta;
     }
     return accrued;
+  }
+
+  /////////////////////////////////////////////////////////
+  // Hypothetical Calculation
+  /////////////////////////////////////////////////////////
+  /**
+   * @notice Determine what the account liquidity would be if the given amounts were redeemed/borrowed
+   * @param account The account to determine liquidity for
+   * @param cTokenModify The market to hypothetically redeem/borrow in
+   * @param intraSafeLimitMantissa The safe limit rate for intra group liquidity
+   * @param interSafeLimitMantissa The safe limit rate for inter group liquidity
+   * @return (hypothetical account liquidity in excess of collateral requirements)
+   */
+  function getHypotheticalSafeLimit(
+    address account,
+    address cTokenModify,
+    uint256 intraSafeLimitMantissa,
+    uint256 interSafeLimitMantissa
+  ) external view returns (uint256) {
+    IComptroller c = IComptroller(comptroller);
+    bool interMintAllowed = c.interMintAllowed();
+    uint256 assetsGroupNum = c.globalConfig().largestGroupId + 1;
+    GroupVar[] memory groupVars = new GroupVar[](assetsGroupNum);
+    bool targetIsSuToken = (cTokenModify != address(0)) && !ICToken(cTokenModify).isCToken();
+    uint256 redeemTokens = 0;
+    uint256 borrowAmount = 0;
+
+    uint256 sumLiquidity = 0;
+    uint256 sumBorrowPlusEffects = 0;
+    uint256 sumInterCBorrowVal = 0;
+    uint256 sumInterSuBorrowVal = 0;
+    GroupVar memory targetGroup;
+
+    // For each asset the account is in
+    address[] memory assets = c.getAssetsIn(account);
+
+    // loop through tokens to add deposit/borrow for ctoken/sutoken in each group
+    for (uint256 i = 0; i < assets.length; ++i) {
+      address asset = assets[i];
+      uint256 depositVal = 0;
+      uint256 borrowVal = 0;
+
+      (, uint8 assetGroupId, ) = c.markets(asset);
+      if (groupVars[assetGroupId].groupId == 0) {
+        CompactAssetGroup memory g = c.assetGroup(assetGroupId);
+        groupVars[assetGroupId] = GroupVar(
+          g.groupId,
+          0,
+          0,
+          0,
+          0,
+          uint256(g.intraCRatePercent) * percentScale,
+          uint256(g.intraMintRatePercent) * percentScale,
+          uint256(g.intraSuRatePercent) * percentScale,
+          uint256(g.interCRatePercent) * percentScale,
+          uint256(g.interSuRatePercent) * percentScale
+        );
+      }
+
+      (
+        uint256 depositBalance,
+        uint256 borrowBalance,
+        uint256 exchangeRateMantissa,
+        uint256 discountRateMantissa
+      ) = ICToken(asset).getAccountSnapshot(account);
+
+      // skip the calculation to save gas
+      if (asset != cTokenModify && depositBalance == 0 && borrowBalance == 0) {
+        continue;
+      }
+
+      // Get price of asset
+      // normalize price for asset with unit of 1e(36-token decimal)
+      uint256 oraclePriceMantissa = c.getUnderlyingPriceNormalized(asset);
+
+      // Pre-compute a conversion factor from tokens -> USD (normalized price value)
+      // tokensToDenom = oraclePrice * exchangeRate * discourntRate
+      uint256 tokensToDenom = (((oraclePriceMantissa * exchangeRateMantissa) / expScale) * discountRateMantissa) /
+        expScale;
+
+      depositVal += (tokensToDenom * depositBalance) / expScale;
+      borrowVal += (oraclePriceMantissa * borrowBalance) / expScale;
+      if (asset == cTokenModify) {
+        uint256 redeemVal = (tokensToDenom * redeemTokens) / expScale;
+        if (redeemVal <= depositVal) {
+          // if redeemedVal <= depositVal, absorb it with deposits
+          depositVal = depositVal - redeemVal;
+          redeemVal = 0;
+        } else {
+          // if redeemVal > depositVal
+          redeemVal = redeemVal - depositVal;
+          borrowVal = borrowVal + redeemVal;
+          depositVal = 0;
+        }
+
+        borrowVal += (oraclePriceMantissa * borrowAmount) / expScale;
+      }
+
+      if (ICToken(asset).isCToken()) {
+        groupVars[assetGroupId].cDepositVal += depositVal;
+        groupVars[assetGroupId].cBorrowVal += borrowVal;
+      } else {
+        groupVars[assetGroupId].suDepositVal += depositVal;
+        groupVars[assetGroupId].suBorrowVal += borrowVal;
+      }
+    }
+    // end of loop in assets
+
+    // loop in groups to calculate accumulated collateral/liability for two types:
+    // inter-group and intra-group for target token
+    (, uint8 targetGroupId, ) = c.markets(cTokenModify);
+
+    for (uint8 i = 0; i < assetsGroupNum; ++i) {
+      if (groupVars[i].groupId == 0) {
+        continue;
+      }
+      GroupVar memory g = groupVars[i];
+
+      // absorb sutoken loan with ctoken collateral
+      if (g.suBorrowVal > 0) {
+        (g.cDepositVal, g.suBorrowVal) = absorbLoan(g.cDepositVal, g.suBorrowVal, g.intraMintRate);
+      }
+
+      // absorb ctoken loan with ctoken collateral
+      if (g.cBorrowVal > 0) {
+        (g.cDepositVal, g.cBorrowVal) = absorbLoan(g.cDepositVal, g.cBorrowVal, g.intraCRate);
+      }
+
+      // absorb sutoken loan with sutoken collateral
+      if (g.suBorrowVal > 0) {
+        (g.suDepositVal, g.suBorrowVal) = absorbLoan(g.suDepositVal, g.suBorrowVal, g.intraSuRate);
+      }
+
+      // absorb ctoken loan with sutoken collateral
+      if (g.cBorrowVal > 0) {
+        (g.suDepositVal, g.cBorrowVal) = absorbLoan(g.suDepositVal, g.cBorrowVal, g.intraSuRate);
+      }
+
+      // after intra-group collateral-liability match, either asset or debt must be 0
+      if (g.cDepositVal + g.suDepositVal != 0 && g.cBorrowVal + g.suBorrowVal != 0) {
+        revert EitherAssetOrDebtMustBeZeroInGroup(
+          g.groupId,
+          g.cDepositVal,
+          g.suDepositVal,
+          g.cBorrowVal,
+          g.suBorrowVal
+        );
+      }
+
+      if (g.groupId == targetGroupId) {
+        targetGroup = g;
+      } else {
+        sumLiquidity += (g.interCRate * g.cDepositVal) / expScale;
+        sumLiquidity += (g.interSuRate * g.suDepositVal) / expScale;
+        sumInterCBorrowVal = sumInterCBorrowVal + g.cBorrowVal;
+        sumInterSuBorrowVal = sumInterSuBorrowVal + g.suBorrowVal;
+      }
+    }
+
+    // absorb c-loan with inter group collateral
+    (sumLiquidity, sumInterCBorrowVal) = deduct(sumLiquidity, sumInterCBorrowVal);
+
+    // absorb su-loan with inter group collateral only if inter mint is allowed
+    if (interMintAllowed) {
+      (sumLiquidity, sumInterSuBorrowVal) = deduct(sumLiquidity, sumInterSuBorrowVal);
+    }
+
+    // absorb target group c-loan with other group collateral
+    (sumLiquidity, targetGroup.cBorrowVal) = deduct(sumLiquidity, targetGroup.cBorrowVal);
+
+    // absorb target group s-loan with other group collateral only if inter mint is allowed
+    if (interMintAllowed) {
+      (sumLiquidity, targetGroup.suBorrowVal) = deduct(sumLiquidity, targetGroup.suBorrowVal);
+    }
+
+    // absorb inter group c-loan with target group c-collateral
+    if (sumInterCBorrowVal > 0) {
+      (targetGroup.cDepositVal, sumInterCBorrowVal) = absorbLoan(
+        targetGroup.cDepositVal,
+        sumInterCBorrowVal,
+        targetGroup.interCRate
+      );
+    }
+
+    // absorb inter group c-loan with target group su-collateral
+    if (sumInterCBorrowVal > 0) {
+      (targetGroup.suDepositVal, sumInterCBorrowVal) = absorbLoan(
+        targetGroup.suDepositVal,
+        sumInterCBorrowVal,
+        targetGroup.interSuRate
+      );
+    }
+
+    // absorb inter group su-loan only if inter mint allowed
+    if (interMintAllowed) {
+      // absorb inter group su-loan with target group c-collateral
+      if (sumInterSuBorrowVal > 0) {
+        (targetGroup.cDepositVal, sumInterSuBorrowVal) = absorbLoan(
+          targetGroup.cDepositVal,
+          sumInterSuBorrowVal,
+          targetGroup.interCRate
+        );
+      }
+
+      if (sumInterSuBorrowVal > 0) {
+        (targetGroup.suDepositVal, sumInterSuBorrowVal) = absorbLoan(
+          targetGroup.suDepositVal,
+          sumInterSuBorrowVal,
+          targetGroup.interSuRate
+        );
+      }
+    }
+
+    sumBorrowPlusEffects = sumInterCBorrowVal + sumInterSuBorrowVal + targetGroup.cBorrowVal + targetGroup.suBorrowVal;
+    if (sumBorrowPlusEffects > 0) {
+      return 0;
+    }
+
+    if (targetIsSuToken) {
+      if (!interMintAllowed) {
+        sumLiquidity = 0;
+      }
+      sumLiquidity = (sumLiquidity * interSafeLimitMantissa) / expScale;
+      // if target is sutoken
+      // limit = inter-group limit + intra ctoken collateral * intra mint rate
+      sumLiquidity +=
+        (targetGroup.intraMintRate * targetGroup.cDepositVal * intraSafeLimitMantissa) /
+        expScale /
+        expScale;
+    } else {
+      // if target is not sutoken
+      // limit = inter-group limit + intra ctoken collateral * intra c rate
+      sumLiquidity = (sumLiquidity * interSafeLimitMantissa) / expScale;
+      sumLiquidity += (targetGroup.intraCRate * targetGroup.cDepositVal * intraSafeLimitMantissa) / expScale / expScale;
+    }
+
+    // limit = inter-group limit + intra-group ctoken limit + intra sutoken collateral * intra su rate
+    sumLiquidity += (targetGroup.intraSuRate * targetGroup.suDepositVal * intraSafeLimitMantissa) / expScale / expScale;
+
+    return sumLiquidity;
+  }
+
+  function deduct(uint256 collateral, uint256 loan) internal pure returns (uint256, uint256) {
+    if (loan == 0) {
+      return (collateral, loan);
+    }
+    if (collateral > loan) {
+      collateral -= loan;
+      loan = 0;
+    } else {
+      loan -= collateral;
+      collateral = 0;
+    }
+    return (collateral, loan);
+  }
+
+  function absorbLoan(
+    uint256 collateralValue,
+    uint256 borrowValue,
+    uint256 collateralRate
+  ) internal pure returns (uint256, uint256) {
+    if (collateralRate == 0) {
+      return (0, borrowValue);
+    }
+    uint256 collateralizedLoan = (collateralRate * collateralValue) / expScale;
+    uint256 usedCollateral = (borrowValue * expScale) / collateralRate;
+    uint256 newCollateralValue = 0;
+    uint256 newBorrowValue = 0;
+    if (collateralizedLoan > borrowValue) {
+      newCollateralValue = collateralValue - usedCollateral;
+    } else {
+      newBorrowValue = borrowValue - collateralizedLoan;
+    }
+    return (newCollateralValue, newBorrowValue);
   }
 }

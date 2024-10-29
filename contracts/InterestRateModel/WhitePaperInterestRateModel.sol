@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import './InterestRateModel.sol';
 import '@openzeppelin/contracts/utils/math/SafeMath.sol';
@@ -12,33 +12,27 @@ import '@openzeppelin/contracts/utils/math/SafeMath.sol';
 contract WhitePaperInterestRateModel is InterestRateModel {
   using SafeMath for uint256;
 
-  event NewInterestParams(uint256 blocksPerYear, uint256 baseRatePerBlock, uint256 multiplierPerBlock);
-
-  /**
-   * @notice The approximate number of blocks per year that is assumed by the interest rate model
-   */
-  uint256 public blocksPerYear;
+  event NewInterestParams(uint256 baseRatePerSecond, uint256 multiplierPerSecond);
 
   /**
    * @notice The multiplier of utilization rate that gives the slope of the interest rate
    */
-  uint256 public multiplierPerBlock;
+  uint256 public multiplierPerSecond;
 
   /**
    * @notice The base interest rate which is the y-intercept when utilization rate is 0
    */
-  uint256 public baseRatePerBlock;
+  uint256 public baseRatePerSecond;
 
   /**
    * @notice Construct an interest rate model
    * @param baseRatePerYear The approximate target base APR, as a mantissa (scaled by 1e18)
    * @param multiplierPerYear The rate of increase in interest rate wrt utilization (scaled by 1e18)
    */
-  constructor(uint256 blocksPerYearOnChain, uint256 baseRatePerYear, uint256 multiplierPerYear) {
-    blocksPerYear = blocksPerYearOnChain;
-    baseRatePerBlock = baseRatePerYear.div(blocksPerYear);
-    multiplierPerBlock = multiplierPerYear.div(blocksPerYear);
-    emit NewInterestParams(blocksPerYear, baseRatePerBlock, multiplierPerBlock);
+  constructor(uint256 baseRatePerYear, uint256 multiplierPerYear) {
+    baseRatePerSecond = baseRatePerYear.div(secondsPerYear);
+    multiplierPerSecond = multiplierPerYear.div(secondsPerYear);
+    emit NewInterestParams(baseRatePerSecond, multiplierPerSecond);
   }
 
   /**
@@ -69,7 +63,7 @@ contract WhitePaperInterestRateModel is InterestRateModel {
    */
   function getBorrowRate(uint256 cash, uint256 borrows, uint256 reserves) public view override returns (uint256) {
     uint256 ur = utilizationRate(cash, borrows, reserves);
-    return ur.mul(multiplierPerBlock).div(1e18).add(baseRatePerBlock);
+    return ur.mul(multiplierPerSecond).div(1e18).add(baseRatePerSecond);
   }
 
   /**

@@ -1,4 +1,4 @@
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '../Interfaces/IRedemptionManager.sol';
 import '../Interfaces/IComptroller.sol';
@@ -62,9 +62,7 @@ contract RedemptionManager is
     _disableInitializers();
   }
 
-  function initialize(address _admin, IComptroller _comptroller, address _redemptionSigner) external initializer {
-    comptroller = _comptroller;
-    emit NewComptroller(address(0), address(comptroller));
+  function initialize(address _admin, address _redemptionSigner) external initializer {
     redemptionSigner = _redemptionSigner;
     emit NewRedemptionSigner(address(0), redemptionSigner);
     _setupRole(DEFAULT_ADMIN_ROLE, _admin);
@@ -165,8 +163,7 @@ contract RedemptionManager is
     ICToken(cToken).accrueInterest();
     ICToken(csuToken).accrueInterest();
 
-    (uint256 oErr, uint256 depositBalance, , uint256 cExRateMantissa) = ICToken(cToken).getAccountSnapshot(provider);
-    require(oErr == 0, 'snapshot error');
+    (uint256 depositBalance, , uint256 cExRateMantissa, ) = ICToken(cToken).getAccountSnapshot(provider);
 
     if (depositBalance <= 0) {
       return (0, 0, 0, 0);

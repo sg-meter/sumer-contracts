@@ -1,22 +1,6 @@
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 interface IAccountLiquidity {
-  struct Exp {
-    uint mantissa;
-  }
-  struct AccountGroupLocalVars {
-    uint8 groupId;
-    uint256 cDepositVal;
-    uint256 cBorrowVal;
-    uint256 suDepositVal;
-    uint256 suBorrowVal;
-    Exp intraCRate;
-    Exp intraMintRate;
-    Exp intraSuRate;
-    Exp interCRate;
-    Exp interSuRate;
-  }
-
   function getHypotheticalAccountLiquidity(
     address account,
     address cTokenModify,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity >=0.8.19;
+pragma solidity ^0.8.19;
 
 // ====================================================================
 // |     ______                   _______                             |
@@ -150,7 +150,6 @@ contract FraxGaugeFXSRewardsDistributor is Ownable, ReentrancyGuard {
       // Cross chain: Pay out the rewards to the middleman contract
       // Approve for the middleman first
       ERC20(reward_token_address).approve(gauge_address, reward_tally);
-
     } else {
       // Mainnet: Pay out the rewards directly to the gauge
       TransferHelper.safeTransfer(reward_token_address, gauge_address, reward_tally);

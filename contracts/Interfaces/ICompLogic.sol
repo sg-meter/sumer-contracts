@@ -1,10 +1,9 @@
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 interface ICompLogic {
   struct Exp {
-    uint mantissa;
+    uint256 mantissa;
   }
-
   function setCompSpeed(address cToken, uint256 supplySpeed, uint256 borrowSpeed) external;
 
   function updateCompSupplyIndex(address cToken) external;
@@ -17,7 +16,12 @@ interface ICompLogic {
 
   function initializeMarket(address cToken, uint32 blockNumber) external;
 
-  function updateBaseRateFromRedemption(uint redeemAmount, uint _totalSupply) external returns (uint);
+  function uninitializeMarket(address cToken) external;
 
-  function getRedemptionRate() external view returns (uint);
+  function getHypotheticalSafeLimit(
+    address account,
+    address cTokenModify,
+    uint256 intraSafeLimitMantissa,
+    uint256 interSafeLimitMantissa
+  ) external view returns (uint256);
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity >=0.8.19;
+pragma solidity ^0.8.19;
 
 // ====================================================================
 // |     ______                   _______                             |
@@ -179,7 +179,6 @@ contract VeSumer is ReentrancyGuard, Ownable2Step {
   address public future_admin;
 
   /* ========== MODIFIERS ========== */
-
 
   /* ========== CONSTRUCTOR ========== */
   // token_addr: address, _name: String[64], _symbol: String[32], _version: String[32]
