@@ -102,7 +102,7 @@ contract CEther is CToken, Initializable {
   function repayBorrowBehalf(address borrower) external payable {
     (uint256 err, uint256 actualRepay) = repayBorrowBehalfInternal(borrower, msg.value);
     if (actualRepay < msg.value) {
-      (bool sent, ) = msg.sender.call{gas: 5300, value: msg.value - actualRepay}('');
+      (bool sent, ) = msg.sender.call{value: msg.value - actualRepay, gas: 40000}('');
       require(sent, 'refund failed');
     }
     requireNoError(err, 'repayBorrowBehalf failed');
@@ -168,7 +168,7 @@ contract CEther is CToken, Initializable {
     underlyingBalance -= amount;
     /* Send the Ether, with minimal gas and revert on failure */
     // to.transfer(amount);
-    (bool success, ) = to.call{gas: 5300, value: amount}('');
+    (bool success, ) = to.call{value: amount, gas: 40000}(new bytes(0));
     require(success, 'unable to send value, recipient may have reverted');
   }
 

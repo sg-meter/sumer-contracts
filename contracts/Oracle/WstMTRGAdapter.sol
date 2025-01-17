@@ -13,8 +13,8 @@ contract WstMTRGAdapter is PriceAdapter {
   }
 
   /**
-   * @notice Gets the stMTRG for 1 wstMTRG
-   * @return amount Amount of stMTRG
+   * @notice Gets underlying token amount for 1e18 correlated token
+   * @return amount Amount of underlying token
    */
   function exchangeRate() public view override returns (uint256) {
     return IWstMTRG(correlatedToken).stMTRGPerToken();

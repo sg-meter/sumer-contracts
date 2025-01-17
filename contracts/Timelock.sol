@@ -303,7 +303,7 @@ contract Timelock is
       address underlying = ICToken(agreement.cToken).underlying();
       if (underlying == address(0)) {
         // payable(agreement.beneficiary).transfer(agreement.amount);
-        (bool sent, ) = agreement.beneficiary.call{gas: 5300, value: agreement.underlyAmount}('');
+        (bool sent, ) = agreement.beneficiary.call{value: agreement.underlyAmount, gas: 40000}(new bytes(0));
         require(sent, 'transfer failed');
         // Address.sendValue(payable(agreement.beneficiary), agreement.underlyAmount);
       } else {

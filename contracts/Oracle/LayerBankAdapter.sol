@@ -2,16 +2,16 @@
 pragma solidity ^0.8.19;
 import './PriceOracle.sol';
 
-interface IStEUR {
-  function previewRedeem(uint256 shares) external view returns (uint256);
+interface ILayerBank {
+  function priceOf(address token) external view returns (uint256);
 }
 
-contract stEURAdapter is PriceAdapter {
-  uint256 constant EXP_SCALE = 1e18;
-
-  constructor(address _correlatedToken /* stEUR */, address _underlyingToken /* sgEUR (EURA) */) {
+contract LayerBankAdapter is PriceAdapter {
+  address public feedAddr;
+  constructor(address _correlatedToken /* Token */, address _underlyingToken /* USD */, address _feedAddr) {
     correlatedToken = _correlatedToken;
     underlyingToken = _underlyingToken;
+    feedAddr = _feedAddr;
   }
 
   /**
@@ -19,6 +19,6 @@ contract stEURAdapter is PriceAdapter {
    * @return amount Amount of underlying token
    */
   function exchangeRate() public view override returns (uint256) {
-    return IStEUR(correlatedToken).previewRedeem(EXP_SCALE);
+    return ILayerBank(feedAddr).priceOf(correlatedToken);
   }
 }

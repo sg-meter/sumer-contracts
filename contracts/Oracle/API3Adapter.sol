@@ -28,8 +28,8 @@ contract API3Adapter is PriceAdapter, Ownable2Step {
   }
 
   /**
-   * @notice Gets the correlatedToken for 1 underlyingTOken
-   * @return amount Amount of underlyingToken
+   * @notice Gets underlying token amount for 1e18 correlated token
+   * @return amount Amount of underlying token
    */
   function exchangeRate() public view override returns (uint256) {
     if (proxy == address(0)) {

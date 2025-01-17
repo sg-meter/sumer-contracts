@@ -15,8 +15,8 @@ contract stUSDAdapter is PriceAdapter {
   }
 
   /**
-   * @notice Gets the stETH for 1 wstETH
-   * @return amount Amount of stETH
+   * @notice Gets underlying token amount for 1e18 correlated token
+   * @return amount Amount of underlying token
    */
   function exchangeRate() public view override returns (uint256) {
     return IStUSD(correlatedToken).previewRedeem(EXP_SCALE);

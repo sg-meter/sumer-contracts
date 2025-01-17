@@ -13,6 +13,7 @@ import '@openzeppelin/contracts/access/Ownable.sol';
 import '@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol';
 import '@openzeppelin/contracts/utils/math/SafeMath.sol';
 import '../Interfaces/ICTokenExternal.sol';
+import '../Interfaces/ILayerBank.sol';
 
 error ZeroAddressNotAllowed();
 error ZeroValueNotAllowed();
@@ -59,7 +60,8 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     Pyth,
     Pendle,
     FixedPrice,
-    Adapter
+    Adapter,
+    Layerbank
   }
 
   struct ChainlinkFeed {
@@ -85,6 +87,11 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     address denominator;
   }
 
+  struct LayerBankFeed {
+    address feedAddr;
+    address feedAssetAddr;
+  }
+
   event NewFeed(address indexed asset, Source source, uint8 feedDecimals, uint32 maxStalePeriod, bytes32 metadata);
   event NewPythOracle(address oldValue, address newValue);
   event NewPendlePtOracle(address oldValue, address newValue);
@@ -104,6 +111,8 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
   mapping(address => Source) public mainSource; // asset -> source
   uint8 constant DECIMALS = 18;
   uint256 constant EXP_SCALE = 10 ** 18;
+
+  mapping(address => LayerBankFeed) public layerbankFeeds; // asset -> layerbank feeds
 
   constructor(
     address admin,
@@ -375,6 +384,34 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
   }
 
   ///////////////////////////////////////////////////
+  // Layerbank
+  ///////////////////////////////////////////////////
+  function setLayerbankFeed(address asset, address feedAddr, address feedAssetAddr) public onlyOwner {
+    if (feedAddr == address(0)) {
+      revert EmptyFeedAddress();
+    }
+
+    layerbankFeeds[asset] = LayerBankFeed({feedAddr: feedAddr, feedAssetAddr: feedAssetAddr});
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.Layerbank;
+    }
+  }
+
+  function _getLayerbankPrice(LayerBankFeed memory feedData) internal view returns (uint256) {
+    ILayerBank feed = ILayerBank(feedData.feedAddr);
+
+    uint256 price = feed.priceOf(feedData.feedAssetAddr);
+    return price;
+  }
+
+  function removeLayerbankFeed(address asset) public onlyOwner {
+    delete layerbankFeeds[asset];
+    if (mainSource[asset] == Source.Layerbank) {
+      mainSource[asset] = Source.Unknown;
+    }
+  }
+
+  ///////////////////////////////////////////////////
   // Set Main Source
   ///////////////////////////////////////////////////
   function setMainSource(address asset, Source source) public onlyOwner {
@@ -415,6 +452,9 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
       // Adapter
       AdapterFeed memory feedData = adapterFeeds[asset];
       price = _getAdapterPrice(feedData);
+    } else if (source == Source.Layerbank) {
+      LayerBankFeed memory feedData = layerbankFeeds[asset];
+      price = _getLayerbankPrice(feedData);
     } else {
       revert UnsupportedSource();
     }

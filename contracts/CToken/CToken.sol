@@ -560,12 +560,20 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
       underlyingBalance += mintAmount;
     }
 
+    if (actualMintAmount <= 1000) {
+      revert NotEnoughUnderlyingForMint();
+    }
+
     /*
      * We get the current exchange rate and calculate the number of cTokens to be minted:
      *  mintTokens = actualMintAmount / exchangeRate
      */
 
     uint mintTokens = div_(actualMintAmount, exchangeRate);
+
+    if (mintTokens == 0) {
+      revert MintTokensCantBeZero();
+    }
 
     /*
      * We calculate the new total supply of cTokens and minter token balance, checking for overflow:
@@ -674,6 +682,10 @@ abstract contract CToken is CTokenStorage, ExponentialNoErrorNew, SumerErrors {
     /* We write previously calculated values into storage */
     totalSupply = totalSupply - redeemTokens;
     accountTokens[redeemer] = accountTokens[redeemer] - redeemTokens;
+
+    if (accountTokens[redeemer] > 0 && accountTokens[redeemer] <= 1000) {
+      revert NotEnoughUnderlyingAfterRedeem();
+    }
 
     /*
      * We invoke doTransferOut for the redeemer and the redeemAmount.

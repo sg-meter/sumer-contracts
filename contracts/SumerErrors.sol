@@ -94,6 +94,9 @@ contract SumerErrors {
   error AddReservesMarketNotFresh();
   error SetReservesFactorMarketNotFresh();
   error CantExitMarketWithNonZeroBorrowBalance();
+  error MintTokensCantBeZero();
+  error NotEnoughUnderlyingForMint();
+  error NotEnoughUnderlyingAfterRedeem();
 
   error InvalidTimestamp();
 
