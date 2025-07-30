@@ -52,37 +52,33 @@ contract CEther is CToken, Initializable {
    * @dev Reverts upon any failure
    */
   function mint() external payable {
-    (uint256 err, ) = mintInternal(msg.value);
-    requireNoError(err, 'mint failed');
+    mintInternal(msg.value);
   }
 
   /**
    * @notice Sender redeems cTokens in exchange for the underlying asset
    * @dev Accrues interest whether or not the operation succeeds, unless reverted
    * @param redeemTokens The number of cTokens to redeem into underlying
-   * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
    */
-  function redeem(uint256 redeemTokens) external returns (uint256) {
-    return redeemInternal(redeemTokens);
+  function redeem(uint256 redeemTokens) external {
+    redeemInternal(redeemTokens);
   }
 
   /**
    * @notice Sender redeems cTokens in exchange for a specified amount of underlying asset
    * @dev Accrues interest whether or not the operation succeeds, unless reverted
    * @param redeemAmount The amount of underlying to redeem
-   * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
    */
-  function redeemUnderlying(uint256 redeemAmount) external returns (uint256) {
-    return redeemUnderlyingInternal(redeemAmount);
+  function redeemUnderlying(uint256 redeemAmount) external {
+    redeemUnderlyingInternal(redeemAmount);
   }
 
   /**
    * @notice Sender borrows assets from the protocol to their own address
    * @param borrowAmount The amount of the underlying asset to borrow
-   * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
    */
-  function borrow(uint256 borrowAmount) external returns (uint256) {
-    return borrowInternal(borrowAmount);
+  function borrow(uint256 borrowAmount) external {
+    borrowInternal(borrowAmount);
   }
 
   /**
@@ -90,8 +86,7 @@ contract CEther is CToken, Initializable {
    * @dev Reverts upon any failure
    */
   function repayBorrow() external payable {
-    (uint256 err, ) = repayBorrowInternal(msg.value);
-    requireNoError(err, 'repayBorrow failed');
+    repayBorrowInternal(msg.value);
   }
 
   /**
@@ -100,12 +95,11 @@ contract CEther is CToken, Initializable {
    * @param borrower the account with the debt being paid off
    */
   function repayBorrowBehalf(address borrower) external payable {
-    (uint256 err, uint256 actualRepay) = repayBorrowBehalfInternal(borrower, msg.value);
+    uint256 actualRepay = repayBorrowBehalfInternal(borrower, msg.value);
     if (actualRepay < msg.value) {
-      (bool sent, ) = msg.sender.call{value: msg.value - actualRepay, gas: 40000}('');
+      (bool sent, ) = msg.sender.call{gas: 5300, value: msg.value - actualRepay}('');
       require(sent, 'refund failed');
     }
-    requireNoError(err, 'repayBorrowBehalf failed');
   }
 
   /**
@@ -116,24 +110,21 @@ contract CEther is CToken, Initializable {
    * @param cTokenCollateral The market in which to seize collateral from the borrower
    */
   function liquidateBorrow(address borrower, address cTokenCollateral) external payable {
-    (uint256 err, ) = liquidateBorrowInternal(borrower, msg.value, cTokenCollateral);
-    requireNoError(err, 'liquidateBorrow failed');
+    liquidateBorrowInternal(borrower, msg.value, cTokenCollateral);
   }
 
   /**
    * @notice The sender adds to reserves.
-   * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
    */
-  function _addReserves() external payable returns (uint256) {
-    return _addReservesInternal(msg.value);
+  function _addReserves() external payable {
+    _addReservesInternal(msg.value);
   }
 
   /**
    * @notice Send Ether to CEther to mint
    */
   receive() external payable {
-    (uint256 err, ) = mintInternal(msg.value);
-    requireNoError(err, 'mint failed');
+    mintInternal(msg.value);
   }
 
   /*** Safe Token ***/
@@ -168,7 +159,7 @@ contract CEther is CToken, Initializable {
     underlyingBalance -= amount;
     /* Send the Ether, with minimal gas and revert on failure */
     // to.transfer(amount);
-    (bool success, ) = to.call{value: amount, gas: 40000}(new bytes(0));
+    (bool success, ) = to.call{gas: 5300, value: amount}('');
     require(success, 'unable to send value, recipient may have reverted');
   }
 
@@ -190,31 +181,13 @@ contract CEther is CToken, Initializable {
     }
   }
 
-  function requireNoError(uint256 errCode, string memory message) internal pure {
-    if (errCode == uint256(0)) {
-      return;
-    }
-
-    bytes memory fullMessage = new bytes(bytes(message).length + 5);
-    uint256 i;
-
-    for (i = 0; i < bytes(message).length; i++) {
-      fullMessage[i] = bytes(message)[i];
-    }
-
-    fullMessage[i + 0] = bytes1(uint8(32));
-    fullMessage[i + 1] = bytes1(uint8(40));
-    fullMessage[i + 2] = bytes1(uint8(48 + (errCode / 10)));
-    fullMessage[i + 3] = bytes1(uint8(48 + (errCode % 10)));
-    fullMessage[i + 4] = bytes1(uint8(41));
-
-    require(errCode == uint256(0), string(fullMessage));
-  }
-
   function isCToken() public pure override returns (bool) {
     return true;
   }
   function isCEther() external pure override returns (bool) {
     return true;
+  }
+  function tokenType() external pure virtual returns (CTokenType) {
+    return CTokenType.CEther;
   }
 }

@@ -95,9 +95,9 @@ interface IComptroller {
   function getUnderlyingPriceNormalized(address cToken) external view returns (uint256);
   /*** Policy Hooks ***/
 
-  function mintAllowed(address cToken, address minter, uint256 mintAmount) external;
+  function mintAllowed(address cToken, address minter, uint256 mintAmount, uint256 exchangeRate) external;
 
-  function redeemAllowed(address cToken, address redeemer, uint256 redeemTokens) external;
+  function redeemAllowed(address cToken, address redeemer, uint256 redeemTokens, uint256 exchangeRate) external;
   function redeemVerify(address cToken, address redeemer, uint256 redeemAmount, uint256 redeemTokens) external;
 
   function borrowAllowed(address cToken, address borrower, uint256 borrowAmount) external;

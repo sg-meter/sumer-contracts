@@ -97,6 +97,8 @@ contract SumerErrors {
   error MintTokensCantBeZero();
   error NotEnoughUnderlyingForMint();
   error NotEnoughUnderlyingAfterRedeem();
+  error NotEnoughRedeemTokens();
+  error NotEnoughRedeemAmount();
 
   error InvalidTimestamp();
 
@@ -125,4 +127,8 @@ contract SumerErrors {
   error InvalidBlockNumber();
   error ZeroAddressNotAllowed();
   error InterMintNotAllowed();
+
+  error RepayTokenNotListed();
+  error SeizeTokenNotListed();
+  error Reentered();
 }

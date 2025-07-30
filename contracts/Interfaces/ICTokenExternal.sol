@@ -50,8 +50,6 @@ interface ICToken {
 
   function getPriorVotes(address account, uint256 blockNumber) external view returns (uint96);
 
-  function isDeprecated() external view returns (bool);
-
   function executeRedemption(
     address redeemer,
     address provider,
@@ -59,14 +57,16 @@ interface ICToken {
     address cTokenCollateral,
     uint256 seizeAmount,
     uint256 redemptionRateMantissa
-  ) external returns (uint256);
+  ) external;
 
   function discountRateMantissa() external view returns (uint256);
 
-  function accrueInterest() external returns (uint256);
+  function accrueInterest() external;
 
   function liquidateCalculateSeizeTokens(
     address cTokenCollateral,
     uint256 actualRepayAmount
-  ) external view returns (uint256, uint256, uint256);
+  ) external view returns (uint256, uint256);
+
+  function protocolSeizeShareMantissa() external view returns (uint256);
 }

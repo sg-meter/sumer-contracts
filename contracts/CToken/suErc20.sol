@@ -101,7 +101,7 @@ contract suErc20 is CErc20 {
     address cTokenCollateral,
     uint256 seizeAmount,
     uint256 redemptionRateMantissa
-  ) external nonReentrant returns (uint256) {
+  ) external nonReentrant {
     if (msg.sender != IComptroller(comptroller).redemptionManager()) {
       revert OnlyRedemptionManager();
     }
@@ -117,7 +117,7 @@ contract suErc20 is CErc20 {
     accrueInterest();
     ICToken(cTokenCollateral).accrueInterest();
 
-    uint256 seizeVal = (cPriceMantissa * seizeAmount * cExRateMantissa) / expScale / expScale;
+    uint256 seizeVal = (((seizeAmount * cExRateMantissa) / expScale) * (cPriceMantissa)) / expScale;
     uint256 repayVal = (csuPriceMantissa * repayAmount) / expScale;
     if (seizeVal > repayVal) {
       revert RedemptionSeizeTooMuch();
@@ -127,14 +127,13 @@ contract suErc20 is CErc20 {
     ICToken(cTokenCollateral).seize(redeemer, provider, seizeAmount, uint256(0), true, redemptionRateMantissa);
 
     emit RedeemFaceValue(redeemer, provider, repayAmount, cTokenCollateral, seizeAmount, redemptionRateMantissa);
-    return uint256(0);
   }
 
   function protectedMint(
     address cTokenCollateral,
     uint256 cBorrowAmount,
     uint256 suBorrowAmount
-  ) external nonReentrant returns (uint256) {
+  ) external nonReentrant {
     if (!CToken(cTokenCollateral).isCToken()) {
       revert NotCToken();
     }
@@ -151,10 +150,8 @@ contract suErc20 is CErc20 {
       revert InvalidAmount();
     }
 
-    uint256 bnd = CToken(cTokenCollateral).borrowAndDepositBack(payable(msg.sender), cBorrowAmount);
-    if (bnd != 0) {
-      revert BorrowAndDepositBackFailed();
-    }
+    CToken(cTokenCollateral).borrowAndDepositBack(payable(msg.sender), cBorrowAmount);
+
     return borrowFresh(payable(msg.sender), suBorrowAmount, true);
   }
 
@@ -163,5 +160,8 @@ contract suErc20 is CErc20 {
   }
   function isCEther() external pure override returns (bool) {
     return false;
+  }
+  function tokenType() external pure virtual override returns (CTokenType) {
+    return CTokenType.CSuErc20;
   }
 }

@@ -3,14 +3,14 @@ pragma solidity ^0.8.19;
 
 import './ComptrollerStorage.sol';
 import '../Interfaces/ICTokenExternal.sol';
-import '@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol';
+import '@openzeppelin/contracts/access/AccessControl.sol';
 import '../SumerErrors.sol';
 
 /**
  * @title Compound's Comptroller Contract
  * @author Compound
  */
-contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerErrors {
+contract MockComptroller is AccessControl, ComptrollerStorage, SumerErrors {
   /// @notice Emitted when an admin supports a market
   event MarketListed(address cToken);
 
@@ -60,28 +60,9 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
 
   event RemoveAssetGroup(uint8 indexed groupId);
 
-  constructor() {
-    _disableInitializers();
-  }
-
-  function initialize(
-    address _admin,
-    address _gov,
-    address _compLogic,
-    address _redemptionManager,
-    address _timelock,
-    address _oracle
-  ) external initializer {
+  constructor(address _admin, address _oracle) {
     _setupRole(DEFAULT_ADMIN_ROLE, _admin);
 
-    governanceToken = _gov;
-    // Set comptroller's oracle to newOracle
-
-    compLogic = ICompLogic(_compLogic);
-    redemptionManager = IRedemptionManager(_redemptionManager);
-    emit NewDependencies(_compLogic, _redemptionManager);
-
-    timelock = _timelock;
     oracle = IPriceOracle(_oracle);
     emit NewPriceOracle(address(oracle));
   }
@@ -154,12 +135,12 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    * @notice Add assets to be included in account liquidity calculation
    * @param cTokens The list of addresses of the cToken markets to be enabled
    */
-  function enterMarkets(address[] memory cTokens) public {
+  function enterMarketsFor(address owner, address[] memory cTokens) public {
     uint256 len = cTokens.length;
 
     for (uint256 i = 0; i < len; ++i) {
       address cToken = cTokens[i];
-      addToMarketInternal(cToken, msg.sender);
+      addToMarketInternal(cToken, owner);
     }
   }
 
@@ -207,19 +188,19 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    *  or be providing necessary collateral for an outstanding borrow.
    * @param cTokenAddress The address of the asset to be removed
    */
-  function exitMarket(address cTokenAddress) external {
+  function exitMarketFor(address owner, address cTokenAddress) external {
     address cToken = cTokenAddress;
     /* Get sender tokensHeld and amountOwed underlying from the cToken */
-    (uint256 tokensHeld, uint256 amountOwed, , ) = ICToken(cToken).getAccountSnapshot(msg.sender);
+    (uint256 tokensHeld, uint256 amountOwed, , ) = ICToken(cToken).getAccountSnapshot(owner);
 
     /* Fail if the sender has a borrow balance */
     if (amountOwed != 0) {
       revert CantExitMarketWithNonZeroBorrowBalance();
     }
     /* Fail if the sender is not permitted to redeem all of their tokens */
-    redeemAllowedInternal(cTokenAddress, msg.sender, tokensHeld);
+    redeemAllowedInternal(cTokenAddress, owner, tokensHeld);
 
-    _exitMarketInternal(msg.sender, cTokenAddress);
+    _exitMarketInternal(owner, cTokenAddress);
   }
 
   function _exitMarketInternal(address user, address cTokenAddress) internal {
@@ -353,8 +334,6 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
     allMarkets[index] = allMarkets[len - 1];
     allMarkets.pop();
 
-    compLogic.uninitializeMarket(cToken);
-
     emit MarketUnlisted(cToken);
 
     // keep marketConfig here so that paused information is not lost
@@ -384,7 +363,6 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
       revert InvalidBlockNumber();
     }
     uint32 blockNumber = uint32(block.number);
-    compLogic.initializeMarket(cToken, blockNumber);
   }
 
   /////////////////////////////////////////////////////////
@@ -572,12 +550,7 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    * @param minter The account which would get the minted tokens
    * @param mintAmount The amount of underlying being supplied to the market in exchange for tokens
    */
-  function mintAllowed(
-    address cToken,
-    address minter,
-    uint256 mintAmount,
-    uint256 exchangeRate
-  ) external onlyListedCToken(cToken) {
+  function mintAllowed(address cToken, address minter, uint256 mintAmount, uint256 exchangeRate) external {
     if (exchangeRate > 5 * expScale) {
       revert InvalidExchangeRate();
     }
@@ -636,11 +609,7 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
     // compLogic.distributeSupplierComp(cToken, redeemer);
   }
 
-  function redeemAllowedInternal(
-    address cToken,
-    address redeemer,
-    uint256 redeemTokens
-  ) internal view onlyListedCToken(cToken) {
+  function redeemAllowedInternal(address cToken, address redeemer, uint256 redeemTokens) internal view {
     /* If the redeemer is not 'in' the market, then we can bypass the liquidity check */
     if (!markets[cToken].accountMembership[redeemer]) {
       return;
@@ -660,15 +629,7 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    * @param redeemAmount The amount of the underlying asset being redeemed
    * @param redeemTokens The number of tokens being redeemed
    */
-  function redeemVerify(
-    address cToken,
-    address redeemer,
-    uint256 redeemAmount,
-    uint256 redeemTokens
-  ) external onlyListedCToken(msg.sender) {
-    if (msg.sender != cToken) {
-      revert InvalidCToken();
-    }
+  function redeemVerify(address cToken, address redeemer, uint256 redeemAmount, uint256 redeemTokens) external {
     // Shh - currently unused: cToken; redeemer;
 
     // Require tokens is zero or amount is also zero
@@ -689,19 +650,25 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    * @param borrower The account which would borrow the asset
    * @param borrowAmount The amount of underlying the account would borrow
    */
-  function borrowAllowed(address cToken, address borrower, uint256 borrowAmount) external onlyListedCToken(cToken) {
+  function borrowAllowed(address cToken, address borrower, uint256 borrowAmount) external {
     // Pausing is a very serious situation - we revert to sound the alarms
     if (marketConfig[cToken].borrowPaused) {
       revert BorrowPaused();
     }
 
-    for (uint256 i = 0; i < accountAssets[borrower].length; i++) {
+    for (uint256 i = 0; i < accountAssets[borrower].length; ++i) {
       address asset = accountAssets[borrower][i];
 
       if (!markets[asset].isListed) {
-        revert MarketNotListed();
-      }
-      if (marketConfig[asset].borrowPaused) {
+        // unlisted market
+        (uint256 tokensHeld, uint256 amountOwed, , ) = ICToken(asset).getAccountSnapshot(borrower);
+
+        if (tokensHeld == 0 && amountOwed == 0) {
+          _exitMarketInternal(borrower, asset);
+        } else {
+          revert MarketNotListed();
+        }
+      } else if (marketConfig[asset].borrowPaused) {
         revert MarketPaused();
       }
     }
@@ -771,12 +738,7 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    * @param borrower The account which would borrowed the asset
    * @param repayAmount The amount of the underlying asset the account would repay
    */
-  function repayBorrowAllowed(
-    address cToken,
-    address payer,
-    address borrower,
-    uint256 repayAmount
-  ) external onlyListedCToken(cToken) {
+  function repayBorrowAllowed(address cToken, address payer, address borrower, uint256 repayAmount) external {
     // Shh - currently unused: repayAmount;
     // TODO: temporarily comment out for less gas usage
     // Keep the flywheel moving
@@ -798,11 +760,8 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
     address borrower,
     uint actualRepayAmount,
     uint borrowIndex
-  ) external onlyListedCToken(msg.sender) {
+  ) external {
     // Shh - currently unused
-    if (cToken != msg.sender) {
-      revert InvalidCToken();
-    }
     payer;
     borrower;
     actualRepayAmount;
@@ -829,7 +788,7 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
     address liquidator,
     address borrower,
     uint256 seizeTokens
-  ) external onlyListedCToken(cTokenCollateral) onlyListedCToken(cTokenBorrowed) {
+  ) external {
     // Pausing is a very serious situation - we revert to sound the alarms
     if (marketConfig[cTokenCollateral].seizePaused) {
       revert SeizePaused();
@@ -891,16 +850,16 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
       revert MarketNotListed();
     }
 
-    // if (!ICToken(cTokenBorrowed).isCToken() && ICToken(cTokenCollateral).isCToken() && !interMintAllowed) {
-    //   revert InterMintNotAllowed();
-    // }
+    if (!ICToken(cTokenBorrowed).isCToken() && ICToken(cTokenCollateral).isCToken() && !interMintAllowed) {
+      revert InterMintNotAllowed();
+    }
 
     uint256 borrowBalance = ICToken(cTokenBorrowed).borrowBalanceStored(borrower);
 
     if (block.timestamp - globalConfig.minWaitBeforeLiquidatable <= lastBorrowedAt[borrower]) {
       revert NotLiquidatableYet();
     }
-
+    /* allow accounts to be liquidated if the market is deprecated */
     /* The borrower must have shortfall in order to be liquidatable */
     (, uint256 shortfall) = getHypotheticalAccountLiquidity(borrower, cTokenBorrowed, 0, 0);
 
@@ -937,12 +896,8 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
     address borrower,
     uint actualRepayAmount,
     uint seizeTokens
-  ) external onlyListedCToken(msg.sender) onlyListedCToken(cTokenCollateral) {
+  ) external {
     // Shh - currently unused
-
-    if (cTokenBorrowed != msg.sender) {
-      revert InvalidCToken();
-    }
     cTokenCollateral;
     liquidator;
     borrower;
@@ -960,7 +915,7 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
    * @param borrower The address borrowing the underlying
    * @param borrowAmount The amount of the underlying asset requested to borrow
    */
-  function borrowVerify(address borrower, uint256 borrowAmount) external onlyListedCToken(msg.sender) {
+  function borrowVerify(address borrower, uint256 borrowAmount) external {
     // Shh - currently unused
     // address cToken = msg.sender;
     borrower;
@@ -969,37 +924,14 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
 
     lastBorrowedAt[borrower] = uint48(block.timestamp);
   }
-
-  /////////////////////////////////////////////////////////
-  // Hypothetical Calculation
-  /////////////////////////////////////////////////////////
-  /**
-     * @notice Determine what the account liquidity would be if the given amounts were redeemed/borrowed
-     * @param cTokenModify The market to hypothetically redeem/borrow in
-     * @param account The account to determine liquidity for
-     * @param redeemTokens The number of tokens to hypothetically redeem
-     * @param borrowAmount The amount of underlying to hypothetically borrow
-     * @dev Note that we calculate the exchangeRateStored for each collateral cToken using stored data,
-     *  without calculating accumulated interest.
-     * @return (possible error code,
-                hypothetical account liquidity in excess of collateral requirements,
-     *          hypothetical account shortfall below collateral requirements)
-     */
-  function getHypotheticalAccountLiquidity(
+  function getHypoStep1(
     address account,
     address cTokenModify,
     uint256 redeemTokens,
     uint256 borrowAmount
-  ) public view returns (uint256, uint256) {
+  ) public view returns (GroupVar[] memory) {
     uint256 assetsGroupNum = globalConfig.largestGroupId + 1;
     GroupVar[] memory groupVars = new GroupVar[](assetsGroupNum);
-    bool targetIsSuToken = (cTokenModify != address(0)) && !ICToken(cTokenModify).isCToken();
-
-    uint256 sumLiquidity = 0;
-    uint256 sumBorrowPlusEffects = 0;
-    uint256 sumInterCBorrowVal = 0;
-    uint256 sumInterSuBorrowVal = 0;
-    GroupVar memory targetGroup;
 
     // For each asset the account is in
     address[] memory assets = accountAssets[account];
@@ -1077,11 +1009,26 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
         groupVars[assetGroupId].suBorrowVal += borrowVal;
       }
     }
+    return groupVars;
     // end of loop in assets
+  }
 
+  function getHypoStep2(
+    address account,
+    address cTokenModify,
+    uint256 redeemTokens,
+    uint256 borrowAmount
+  ) public view returns (uint256, uint256, uint256, uint256, GroupVar memory) {
+    uint256 assetsGroupNum = globalConfig.largestGroupId + 1;
+    GroupVar[] memory groupVars = getHypoStep1(account, cTokenModify, redeemTokens, borrowAmount);
     // loop in groups to calculate accumulated collateral/liability for two types:
     // inter-group and intra-group for target token
     uint8 targetGroupId = markets[cTokenModify].assetGroupId;
+    GroupVar memory targetGroup;
+    uint256 sumLiquidity = 0;
+    uint256 sumBorrowPlusEffects = 0;
+    uint256 sumInterCBorrowVal = 0;
+    uint256 sumInterSuBorrowVal = 0;
 
     for (uint8 i = 0; i < assetsGroupNum; ++i) {
       if (groupVars[i].groupId == 0) {
@@ -1129,6 +1076,39 @@ contract Comptroller is AccessControlUpgradeable, ComptrollerStorage, SumerError
         sumInterSuBorrowVal = sumInterSuBorrowVal + g.suBorrowVal;
       }
     }
+    return (sumLiquidity, sumBorrowPlusEffects, sumInterCBorrowVal, sumInterSuBorrowVal, targetGroup);
+  }
+
+  /////////////////////////////////////////////////////////
+  // Hypothetical Calculation
+  /////////////////////////////////////////////////////////
+  /**
+     * @notice Determine what the account liquidity would be if the given amounts were redeemed/borrowed
+     * @param cTokenModify The market to hypothetically redeem/borrow in
+     * @param account The account to determine liquidity for
+     * @param redeemTokens The number of tokens to hypothetically redeem
+     * @param borrowAmount The amount of underlying to hypothetically borrow
+     * @dev Note that we calculate the exchangeRateStored for each collateral cToken using stored data,
+     *  without calculating accumulated interest.
+     * @return (possible error code,
+                hypothetical account liquidity in excess of collateral requirements,
+     *          hypothetical account shortfall below collateral requirements)
+     */
+  function getHypotheticalAccountLiquidity(
+    address account,
+    address cTokenModify,
+    uint256 redeemTokens,
+    uint256 borrowAmount
+  ) public view returns (uint256, uint256) {
+    (
+      uint256 sumLiquidity,
+      uint256 sumBorrowPlusEffects,
+      uint256 sumInterCBorrowVal,
+      uint256 sumInterSuBorrowVal,
+      GroupVar memory targetGroup
+    ) = getHypoStep2(account, cTokenModify, redeemTokens, borrowAmount);
+
+    bool targetIsSuToken = (cTokenModify != address(0)) && !ICToken(cTokenModify).isCToken();
 
     // absorb c-loan with inter group collateral
     (sumLiquidity, sumInterCBorrowVal) = deduct(sumLiquidity, sumInterCBorrowVal);

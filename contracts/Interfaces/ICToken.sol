@@ -36,7 +36,7 @@ interface ICToken {
 
   function getCash() external view returns (uint256);
 
-  function accrueInterest() external returns (uint256);
+  function accrueInterest() external;
 
   // function accrualBlockNumber() external returns (uint256);
 
@@ -47,21 +47,21 @@ interface ICToken {
     uint256 seizeProfitTokens,
     bool isRedemption,
     uint256 redemptionRateMantissa
-  ) external returns (uint256);
+  ) external;
 
   /*** Admin Functions ***/
 
-  function _setPendingAdmin(address payable newPendingAdmin) external returns (uint256);
+  function _setPendingAdmin(address payable newPendingAdmin) external;
 
-  function _acceptAdmin() external returns (uint256);
+  function _acceptAdmin() external;
 
-  function _setComptroller(address newComptroller) external returns (uint256);
+  function _setComptroller(address newComptroller) external;
 
-  function _setReserveFactor(uint256 newReserveFactorMantissa) external returns (uint256);
+  function _setReserveFactor(uint256 newReserveFactorMantissa) external;
 
-  function _reduceReserves(uint256 reduceAmount) external returns (uint256);
+  function _reduceReserves(uint256 reduceAmount) external;
 
-  function _setInterestRateModel(address newInterestRateModel) external returns (uint256);
+  function _setInterestRateModel(address newInterestRateModel) external;
 
   function _setDiscountRate(uint256 discountRateMantissa) external returns (uint256);
 

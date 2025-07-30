@@ -14,6 +14,13 @@ import '@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol';
 import '@openzeppelin/contracts/utils/math/SafeMath.sol';
 import '../Interfaces/ICTokenExternal.sol';
 import '../Interfaces/ILayerBank.sol';
+import '../Interfaces/IVault.sol';
+import '../Interfaces/IPool.sol';
+// import '../Interfaces/UniswapV2.sol';
+// import '../Interfaces/Kodiak.sol';
+
+import './VaultReentrancyLib.sol';
+import './FixedPointMathLib.sol';
 
 error ZeroAddressNotAllowed();
 error ZeroValueNotAllowed();
@@ -31,6 +38,7 @@ error EmptyAdapterAddress();
 error EmptyMaxStalePeriod();
 
 error InvalidPrice(); // thrown when price is 0
+error InvalidDecimals();
 
 /// @notice Checks if the provided address is nonzero, reverts otherwise
 /// @param address_ Address to check
@@ -61,7 +69,10 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     Pendle,
     FixedPrice,
     Adapter,
-    Layerbank
+    Layerbank,
+    Balancer // compatible with balancer v2 and balancer v3
+    // UniswapV2,
+    // KodiakIsland
   }
 
   struct ChainlinkFeed {
@@ -74,6 +85,7 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
   struct PythFeed {
     bytes32 feedId;
     uint32 maxStalePeriod;
+    address denominator;
   }
 
   struct PendleFeed {
@@ -92,6 +104,13 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     address feedAssetAddr;
   }
 
+  struct BalancerFeed {
+    bool isStable;
+  }
+
+  using FixedPointMathLib for int256;
+  using FixedPointMathLib for uint256;
+
   event NewFeed(address indexed asset, Source source, uint8 feedDecimals, uint32 maxStalePeriod, bytes32 metadata);
   event NewPythOracle(address oldValue, address newValue);
   event NewPendlePtOracle(address oldValue, address newValue);
@@ -109,10 +128,11 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
   mapping(address => AdapterFeed) public adapterFeeds; // asset -> adapter feeds
 
   mapping(address => Source) public mainSource; // asset -> source
-  uint8 constant DECIMALS = 18;
+  uint8 constant ORACLE_DECIMALS = 18;
   uint256 constant EXP_SCALE = 10 ** 18;
 
   mapping(address => LayerBankFeed) public layerbankFeeds; // asset -> layerbank feeds
+  mapping(address => BalancerFeed) public balancerFeeds; // asset -> balancer feeds
 
   constructor(
     address admin,
@@ -249,7 +269,7 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     emit NewPythOracle(oldValue, address(pythOracle));
   }
 
-  function setPythFeed(address asset, uint32 maxStalePeriod, bytes32 feedId) public onlyOwner {
+  function setPythFeed(address asset, uint32 maxStalePeriod, bytes32 feedId, address denominator) public onlyOwner {
     if (address(pythOracle) == address(0)) {
       revert EmptyPythOracle();
     }
@@ -259,7 +279,7 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
       revert EmptyMaxStalePeriod();
     }
 
-    pythFeeds[asset] = PythFeed({feedId: feedId, maxStalePeriod: maxStalePeriod});
+    pythFeeds[asset] = PythFeed({feedId: feedId, maxStalePeriod: maxStalePeriod, denominator: denominator});
     if (mainSource[asset] == Source.Unknown) {
       mainSource[asset] = Source.Pyth;
     }
@@ -275,9 +295,13 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
     );
     require(success, 'pyth error');
     (int64 price, , int32 expo, ) = (abi.decode(message, (int64, uint64, int32, uint256)));
-    uint256 decimals = DECIMALS - uint32(expo * -1);
-    require(decimals <= DECIMALS, 'decimal underflow');
-    return uint64(price) * (10 ** decimals);
+    uint256 decimals = ORACLE_DECIMALS - uint32(expo * -1);
+    require(decimals <= ORACLE_DECIMALS, 'decimal underflow');
+    uint256 actualPrice = uint64(price) * (10 ** decimals);
+    if (feedData.denominator != address(0)) {
+      actualPrice = (actualPrice * getPrice(feedData.denominator)) / EXP_SCALE;
+    }
+    return actualPrice;
   }
 
   function removePythFeed(address asset) public onlyOwner {
@@ -412,6 +436,103 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
   }
 
   ///////////////////////////////////////////////////
+  // Layerbank
+  ///////////////////////////////////////////////////
+  function setBalancerFeed(address asset, bool isStable) public onlyOwner {
+    balancerFeeds[asset] = BalancerFeed({isStable: isStable});
+    if (mainSource[asset] == Source.Unknown) {
+      mainSource[asset] = Source.Balancer;
+    }
+  }
+
+  function _getBalancerPrice(address lpAddress, bool isStable) internal view returns (uint256) {
+    if (isStable) {
+      return _getBalancerStablePrice(lpAddress);
+    } else {
+      return _getBalancerVariablePrice(lpAddress);
+    }
+  }
+
+  function _getBalancerVariablePrice(address lpAddress) internal view returns (uint256) {
+    VaultReentrancyLib.ensureNotInVaultContext(IVault(IPool(lpAddress).getVault()));
+    IPool pool = IPool(lpAddress);
+    address vaultAddr = pool.getVault();
+    bytes32 poolId = pool.getPoolId();
+
+    uint8 lpDecimals = pool.decimals();
+    uint256 actualSupply = pool.getActualSupply() * (10 ** (ORACLE_DECIMALS - lpDecimals)); // make it decimals 18
+    (address[] memory tokens, uint256[] memory balances, ) = IVault(vaultAddr).getPoolTokens(poolId);
+
+    // 18 decimals
+    uint256 price0 = getPrice(tokens[0]);
+    uint256 price1 = getPrice(tokens[1]);
+
+    uint256[] memory weights = pool.getNormalizedWeights();
+
+    int256 product0 = int256(price0.divWad(weights[0])).powWad(int256(weights[0]));
+    int256 product1 = int256(price1.divWad(weights[1])).powWad(int256(weights[1]));
+
+    uint256 product = uint256(product0.sMulWad(product1));
+
+    uint256 totalSupply;
+
+    try pool.getActualSupply() returns (uint256 _totalSupply) {
+      totalSupply = _totalSupply;
+    } catch {
+      totalSupply = pool.totalSupply();
+    }
+
+    uint256 invariant = pool.getInvariant();
+
+    return invariant.mulWad(uint256(product)).divWad(totalSupply);
+  }
+
+  function _getBalancerStablePrice(address lpAddress) internal view returns (uint256) {
+    VaultReentrancyLib.ensureNotInVaultContext(IVault(IPool(lpAddress).getVault()));
+    IPool pool = IPool(lpAddress);
+    address vaultAddr = pool.getVault();
+    bytes32 poolId = pool.getPoolId();
+
+    uint8 lpDecimals = pool.decimals();
+    uint256 actualSupply = pool.getActualSupply() * (10 ** (ORACLE_DECIMALS - lpDecimals)); // make it decimals 18
+    (address[] memory tokens, uint256[] memory balances, ) = IVault(vaultAddr).getPoolTokens(poolId);
+
+    uint256 min = type(uint256).max;
+
+    uint256 totalValue = 0;
+    for (uint256 i = 0; i < tokens.length; i++) {
+      address token = tokens[i];
+      if (token == lpAddress) {
+        continue;
+      }
+      uint256 price = getPrice(token);
+      if (price <= 0) {
+        revert InvalidPrice();
+      }
+      uint8 decimals = IERC20Metadata(token).decimals();
+      totalValue += price * balances[i] * (10 ** (ORACLE_DECIMALS - decimals)); // price decimals 18, token decimals 18
+
+      try pool.getTokenRate(token) returns (uint256 rate) {
+        price = price.divWad(rate);
+      } catch {}
+
+      if (price < min) {
+        min = price;
+      }
+    }
+
+    uint256 poolRate = pool.getRate();
+    return min.mulWad(poolRate);
+  }
+
+  function removeBalancerFeed(address asset) public onlyOwner {
+    delete balancerFeeds[asset];
+    if (mainSource[asset] == Source.Balancer) {
+      mainSource[asset] = Source.Unknown;
+    }
+  }
+
+  ///////////////////////////////////////////////////
   // Set Main Source
   ///////////////////////////////////////////////////
   function setMainSource(address asset, Source source) public onlyOwner {
@@ -453,6 +574,7 @@ contract FeedPriceOracle is PriceOracle, Ownable2Step {
       AdapterFeed memory feedData = adapterFeeds[asset];
       price = _getAdapterPrice(feedData);
     } else if (source == Source.Layerbank) {
+      // Layerbank
       LayerBankFeed memory feedData = layerbankFeeds[asset];
       price = _getLayerbankPrice(feedData);
     } else {
